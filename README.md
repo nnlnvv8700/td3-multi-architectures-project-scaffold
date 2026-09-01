@@ -120,8 +120,7 @@ achieved_goal (3) + desired_goal (3)
 | Transformer | 关节 token + Transformer Encoder | 关节序号/距离位置编码 |
 | GNN+Transformer | 图注意力后接 Transformer | 局部拓扑与全局依赖融合 |
 
-当前四种 Actor 参数量并不完全一致，因此实验结果应解释为“不同表示方案的系统比较”，
-不能仅凭单次实验将差异完全归因于架构归纳偏置。严谨消融应进一步做参数量匹配。
+
 
 ## 论文结果图
 
