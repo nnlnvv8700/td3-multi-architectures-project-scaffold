@@ -27,10 +27,7 @@ Stable Trajectory Tracking of High-Degree-of-Freedom (DOF) Manipulators**，发�
 > 论文 Figure 1：GT-TD3 Actor 由关节状态编码、GNN 局部依赖建模、运动学感知
 > Transformer 与门控特征融合组成。
 
-> [!IMPORTANT]
-> 上述图表和数值来自已发表论文的原始 20 维状态实验。当前仓库是发表后正确性修订版，
-> 已将轨迹阶段、当前参考点和前一动作加入状态，使用 31 维 v2 观测。因此旧图用于说明
-> 论文方法与原始结果；若要报告当前代码的性能，应重新运行多种子实验。
+
 
 ## 项目亮点
 
