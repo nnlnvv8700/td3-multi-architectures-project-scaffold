@@ -6,3 +6,4 @@ tensorboard
 pyyaml
 gymnasium>=0.28
 pybullet
+PyMuPDF>=1.23

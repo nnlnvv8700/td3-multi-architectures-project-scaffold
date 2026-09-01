@@ -2,12 +2,35 @@
 
 > A reproducible TD3 research scaffold for KUKA LBR iiwa trajectory tracking in PyBullet.
 
+[![Paper](https://img.shields.io/badge/Machines-14%20(4)%2C%20397-2f80c1)](https://doi.org/10.3390/machines14040397)
+[![DOI](https://img.shields.io/badge/DOI-10.3390%2Fmachines14040397-blue)](https://doi.org/10.3390/machines14040397)
+
 本项目在 PyBullet 中构建 KUKA LBR iiwa 七自由度机械臂轨迹跟踪任务，从头实现
 Twin Delayed Deep Deterministic Policy Gradient（TD3），并在统一 Critic、训练流程和
 评估协议下比较 MLP、GNN、Transformer 与 GNN+Transformer 四种 Actor。
 
 项目重点不是宣称某个架构达到 SOTA，而是提供一套结构清晰、可复现、适合继续做消融
 实验的机器人强化学习框架。
+
+## 论文
+
+本项目对应论文 **GT-TD3: A Kinematics-Aware Graph-Transformer Framework for
+Stable Trajectory Tracking of High-Degree-of-Freedom (DOF) Manipulators**，发表于
+*Machines* 2026, 14(4), 397。
+
+- [论文全文与出版信息](https://doi.org/10.3390/machines14040397)
+- [完整论文图集](assets/paper/README.md)
+- 图片来源：Miao et al., *Machines* 2026，按原文 CC BY 4.0 许可证标注与使用。
+
+![GT-TD3 Actor architecture](assets/paper/figure-01-actor-architecture.png)
+
+> 论文 Figure 1：GT-TD3 Actor 由关节状态编码、GNN 局部依赖建模、运动学感知
+> Transformer 与门控特征融合组成。
+
+> [!IMPORTANT]
+> 上述图表和数值来自已发表论文的原始 20 维状态实验。当前仓库是发表后正确性修订版，
+> 已将轨迹阶段、当前参考点和前一动作加入状态，使用 31 维 v2 观测。因此旧图用于说明
+> 论文方法与原始结果；若要报告当前代码的性能，应重新运行多种子实验。
 
 ## 项目亮点
 
@@ -102,6 +125,23 @@ achieved_goal (3) + desired_goal (3)
 
 当前四种 Actor 参数量并不完全一致，因此实验结果应解释为“不同表示方案的系统比较”，
 不能仅凭单次实验将差异完全归因于架构归纳偏置。严谨消融应进一步做参数量匹配。
+
+## 论文结果图
+
+### 训练任务指标
+
+![Training task metrics](assets/paper/figure-07-training-task-metrics.png)
+
+### 扰动下的稳定性
+
+![Stability curves](assets/paper/figure-11-stability-curves.png)
+
+### 代表性三维轨迹
+
+![Representative trajectory tracking results](assets/paper/figure-13-trajectory-tracking.png)
+
+其余 TD3 学习框架、双 Critic、GNN/Transformer 内部结构、仿真环境、轨迹质量与
+稳定性分布图见 [assets/paper 图集](assets/paper/README.md)。
 
 ## 安装
 
@@ -229,6 +269,7 @@ results/training_summary_v2.csv
 
 ```text
 .
+├── assets/paper/            # 论文 Figure 1–13 与图集说明
 ├── agents/
 │   ├── td3_agent.py          # TD3 更新逻辑与模型保存
 │   ├── networks.py           # 四种 Actor 与共享 Critic
@@ -287,7 +328,22 @@ results/training_summary_v2.csv
 
 ## 引用
 
-核心算法参考：
+如果本项目对你的研究有帮助，请引用：
+
+```bibtex
+@article{miao2026gttd3,
+  title={GT-TD3: A Kinematics-Aware Graph-Transformer Framework for Stable Trajectory Tracking of High-Degree-of-Freedom (DOF) Manipulators},
+  author={Miao, Hanwen and Hou, Haoran and Zhu, Zhaopeng and Chao, Zheng and Zhang, Rui},
+  journal={Machines},
+  volume={14},
+  number={4},
+  pages={397},
+  year={2026},
+  doi={10.3390/machines14040397}
+}
+```
+
+TD3 核心算法参考：
 
 ```bibtex
 @inproceedings{fujimoto2018addressing,
