@@ -1,181 +1,301 @@
-# TD3 Multi‑Architecture for KUKA LBR iiwa (PyBullet)
+# GT-TD3：KUKA iiwa 多架构轨迹跟踪
 
-> 一套开箱即用的 TD3 强化学习项目，支持 **MLP / GNN / Transformer / GNN+Transformer** 四种 Actor 架构；内含 **KUKA LBR iiwa 七自由度**到球目标的到达任务（PyBullet），完整的训练、测试与可视化评估管线。当前默认 **全程稠密奖励**，并提供批量随机点测试与轨迹出图。
+> A reproducible TD3 research scaffold for KUKA LBR iiwa trajectory tracking in PyBullet.
 
----
+本项目在 PyBullet 中构建 KUKA LBR iiwa 七自由度机械臂轨迹跟踪任务，从头实现
+Twin Delayed Deep Deterministic Policy Gradient（TD3），并在统一 Critic、训练流程和
+评估协议下比较 MLP、GNN、Transformer 与 GNN+Transformer 四种 Actor。
 
-## 目录结构（关键文件）
+项目重点不是宣称某个架构达到 SOTA，而是提供一套结构清晰、可复现、适合继续做消融
+实验的机器人强化学习框架。
 
+## 项目亮点
+
+- 自定义 Gymnasium/PyBullet 七自由度连续控制环境。
+- 完整 TD3：双 Critic、Clipped Double-Q、目标策略平滑、延迟策略更新和软目标更新。
+- 四种可替换 Actor，共用相同 Critic 和训练入口。
+- KUKA 七关节链式图拓扑与关节位置编码。
+- 轨迹阶段、当前参考点和前一动作显式进入状态，避免隐藏状态破坏 Markov 性。
+- 固定评估目标集、完整随机种子控制、PER、模型与实验配置自动归档。
+- 成功率、TTS、最小距离、轨迹 RMSE、最大偏差、终点误差和路径长度等指标。
+- PyBullet 多 client 隔离及 9 项单元/端到端回归测试。
+
+## 系统结构
+
+```text
+KukaIiwa7TrackEnv
+  │  31-D state / 7-D joint velocity action
+  ▼
+Actor π(s) ───────────────┐
+  ├─ MLP                  │ action
+  ├─ GNN                  ▼
+  ├─ Transformer       PyBullet
+  └─ GNN+Transformer      │ transition
+                          ▼
+                    ReplayBuffer (PER)
+                          │ batch
+                          ▼
+                Twin Critics Q1 / Q2
+                          │
+          clipped target + delayed actor update
 ```
-Td3 Multi Architectures Project Scaffold/
+
+训练调用链：
+
+```text
+training.config
+      ↓
+training.train_experiment
+      ├── envs.kuka_iiwa_env
+      ├── agents.td3_agent → agents.networks
+      ├── utils.replay_buffer
+      ├── training.evaluator
+      └── training.artifacts → results/<run>/
+```
+
+## 任务定义
+
+| 项目 | 设置 |
+|---|---|
+| 环境 ID | `KukaIiwa7Track-v0` |
+| 机器人 | KUKA LBR iiwa，7 DoF |
+| 动作 | 7 维关节速度，范围 `[-1.5, 1.5]` |
+| 仿真频率 | 240 Hz |
+| 控制周期 | 每次动作执行 10 个仿真步，约 24 Hz |
+| 回合长度 | 200 个控制周期，约 8.33 秒 |
+| 参考轨迹 | 初始末端位置到目标位置的笛卡尔直线，共 201 个对齐点 |
+| 成功阈值 | 末端与目标距离 `< 0.10 m` |
+| 终止策略 | 默认成功后不提前结束，以评估完整轨迹 |
+
+### v2 观测
+
+GoalEnv 字典观测展平后共 31 维：
+
+```text
+observation (25)
+  = joint_position (7)
+  + joint_velocity (7)
+  + trajectory_phase (1)
+  + current_reference_point (3)
+  + previous_action (7)
+
+achieved_goal (3) + desired_goal (3)
+```
+
+图模型将状态编码为 7 个关节节点，每个节点 6 维：
+
+```text
+[q_i, qdot_i, previous_action_i, goal_dx, goal_dy, goal_dz]
+```
+
+轨迹阶段与 `current_reference - achieved_goal` 作为 4 维全局上下文接入 Actor readout，
+因此图模型不会丢失当前参考轨迹信息。
+
+## 四种 Actor
+
+| Actor | 状态处理 | 结构先验 |
+|---|---|---|
+| MLP | 直接输入 31 维状态 | 无显式机器人拓扑 |
+| GNN | 7 个关节节点上的多头图注意力 | KUKA 链式邻接矩阵 |
+| Transformer | 关节 token + Transformer Encoder | 关节序号/距离位置编码 |
+| GNN+Transformer | 图注意力后接 Transformer | 局部拓扑与全局依赖融合 |
+
+当前四种 Actor 参数量并不完全一致，因此实验结果应解释为“不同表示方案的系统比较”，
+不能仅凭单次实验将差异完全归因于架构归纳偏置。严谨消融应进一步做参数量匹配。
+
+## 安装
+
+推荐 Python 3.10+。建议使用独立虚拟环境：
+
+```bash
+python -m venv .venv
+```
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Linux/macOS：
+
+```bash
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+若需要 CUDA，请根据本机 CUDA 版本先从 PyTorch 官方渠道安装对应 PyTorch，再安装其余依赖。
+
+## 快速开始
+
+### 运行回归测试
+
+```bash
+python -m unittest discover -s tests -v
+python verify_system.py
+```
+
+### 训练
+
+唯一规范训练入口：
+
+```bash
+python -m training.train_experiment --actor_arch mlp
+python -m training.train_experiment --actor_arch gnn
+python -m training.train_experiment --actor_arch transformer
+python -m training.train_experiment --actor_arch gnn_transformer
+```
+
+推荐显式设置训练种子和固定评估种子：
+
+```bash
+python -m training.train_experiment \
+  --actor_arch gnn_transformer \
+  --seed 42 \
+  --eval_seed 10000 \
+  --max_timesteps 500000
+```
+
+Windows PowerShell 可写成单行：
+
+```powershell
+python -m training.train_experiment --actor_arch gnn_transformer --seed 42 --eval_seed 10000 --max_timesteps 500000
+```
+
+查看全部参数：
+
+```bash
+python -m training.train_experiment --help
+```
+
+`train.py` 只是兼容包装器，实际训练逻辑仅在
+`training.train_experiment` 中维护。
+
+### 测试模型
+
+```bash
+python -m training.test_agent \
+  --run_dir results/<run_directory> \
+  --episodes 30 \
+  --seed 10000
+```
+
+默认使用无 GUI 的 `rgb_array` 模式；观察仿真时添加：
+
+```bash
+--render_mode human
+```
+
+### 绘制多架构对比图
+
+```bash
+python -m training.evaluate --run_dirs \
+  results/<mlp_run> \
+  results/<gnn_run> \
+  results/<transformer_run> \
+  results/<fusion_run>
+```
+
+训练记录显式保存 `eval_steps`。绘图不会再用评估序号冒充训练步数，也不会在没有多种子
+统计的情况下构造伪不确定性区间。
+
+## 实验输出
+
+每次训练自动创建独立目录：
+
+```text
+results/<env>_<arch>_dense_<timestamp>_seed<seed>/
+├── config.json
+├── final_model.pt
+├── checkpoint_latest.pt
+├── metrics.json
+├── episodes.csv
+├── rewards.npy
+└── success.npy
+```
+
+跨实验稳定表头汇总写入：
+
+```text
+results/training_summary_v2.csv
+```
+
+历史 `training_summary.csv` 存在字段演化导致的列错位，仅供追溯，不应继续用于论文统计。
+
+## 目录结构
+
+```text
+.
 ├── agents/
-│   ├── td3_agent.py           # TD3 实现（设备/超参/训练循环/保存）
-│   └── networks.py            # MLP / GNN / Transformer / GNN+Transformer
+│   ├── td3_agent.py          # TD3 更新逻辑与模型保存
+│   ├── networks.py           # 四种 Actor 与共享 Critic
+│   └── state_encoder.py      # 关节节点编码和图结构
 ├── envs/
-│   └── kuka_iiwa_env.py       # KUKA iiwa Reach 任务（PyBullet）
-├── utils/
-│   ├── replay_buffer.py       # 经验池（支持HER的实现可选；当前训练默认关闭HER）
-│   └── gym_compat.py          # gym/gymnasium 兼容封装
+│   └── kuka_iiwa_env.py      # PyBullet 轨迹跟踪环境
 ├── training/
-│   ├── train_experiment.py    # 训练脚本（默认全程稠密奖励；自动分run目录存档）
-│   ├── evaluate.py            # 评估脚本（生成奖励/成功率/损失/平均损失/评估指标图）
-│   └── test_agent.py          # 随机点批量测试 + 最优轨迹（3D）出图
-├── results/                   # 每次训练的结果与权重（脚本自动创建）
-│   └── LATEST_RUN.txt         # 指向最近一次 run 目录的指针（自动维护）
-├── plots/                     # evaluate.py 输出的图像（plots/<run名称>/...）
-└── plots_result/              # test_agent.py 输出的图像（随机评估/最优轨迹）
+│   ├── train_experiment.py   # 唯一规范训练循环
+│   ├── config.py             # 参数与架构默认值
+│   ├── observation.py        # 统一观测处理
+│   ├── evaluator.py          # 固定种子策略评估
+│   ├── artifacts.py          # checkpoint、指标和汇总
+│   ├── test_agent.py         # 模型测试与轨迹导出
+│   └── evaluate.py           # 多架构结果绘图
+├── utils/
+│   ├── replay_buffer.py      # PER 与兼容 HER 的经验池
+│   └── gym_compat.py         # Gym/Gymnasium API 兼容层
+├── tests/                    # 单元和端到端回归测试
+├── requirements.txt
+└── README.md
 ```
 
-> **提示**：`training/train_experiment.py` 顶部已将本地项目根目录加入 `sys.path`，避免 Windows 下与第三方 `agents` 包发生命名冲突。
+## 正确性修复
 
----
+当前版本相对历史代码重点修复了：
 
-## 环境依赖
+1. 所有 PyBullet 调用显式传递 `physicsClientId`，训练和评估仿真完全隔离。
+2. 未做 HER 重标记时，ReplayBuffer 保留环境真实组合奖励与终止标记。
+3. 将轨迹阶段、当前参考点和前一动作加入状态，补足奖励所依赖的状态变量。
+4. 图节点保留完整三维目标方向，并使用 KUKA 链式邻接矩阵。
+5. Actor 和目标动作使用环境真实动作上限。
+6. 确定性评估关闭 Dropout，目标 Actor 固定为 evaluation mode。
+7. 环境、动作空间、PyTorch、NumPy 与固定评估目标统一种子管理。
+8. 修复余弦学习率调度越过最低点后重新升高的问题。
+9. 将原 1502 行训练文件拆分为单一职责模块，并加入端到端测试。
 
-- Python 3.8+（建议 3.10）
-- PyTorch >= 1.12
-- gymnasium >= 0.28（已做 gym 兼容封装；**不要**再安装旧 gym）
-- pybullet
-- numpy, matplotlib, pyyaml, tensorboard（可选）
+## 复现实验建议
 
-示例 `pip`：
-```bash
-pip install torch numpy matplotlib pyyaml gymnasium pybullet tensorboard
+用于论文或面试展示时，建议遵循：
+
+- 每种架构使用完全相同的训练种子，例如 `42/123/456/789/2025`。
+- 使用相同 `eval_seed`，保证不同模型面对同一批测试目标。
+- 至少运行 3–5 个随机种子，报告均值与标准差。
+- 同时报告成功率、轨迹误差和平滑度，不只比较奖励。
+- 明确区分探索噪声、网络 Dropout 和环境随机性。
+- 若要证明图先验有效，增加链式邻接、全连接邻接和无图结构的消融实验。
+- 若要比较架构优劣，增加参数量匹配版本与 SAC/PPO 等基线。
+
+## 已知限制
+
+- 当前参考轨迹是笛卡尔直线，不包含障碍物与复杂轨迹规划。
+- 当前使用关节速度控制，尚未建模真实驱动器、时延、摩擦误差和传感器噪声。
+- 尚未进行 domain randomization 或 sim-to-real 验证。
+- 历史 GNN checkpoint 可能来自已经替换的旧网络类，参数结构不兼容时需使用历史代码或重新训练。
+- 当前仓库中的历史实验结果不能与修复后的 v2 状态和奖励链路直接比较。
+
+## 引用
+
+核心算法参考：
+
+```bibtex
+@inproceedings{fujimoto2018addressing,
+  title={Addressing Function Approximation Error in Actor-Critic Methods},
+  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},
+  booktitle={Proceedings of the 35th International Conference on Machine Learning},
+  year={2018}
+}
 ```
 
-> 若你看到 “Gym has been unmaintained…” 的警告，说明环境中仍有旧 `gym`，**不必理会**（项目实际使用的是 `gymnasium` + 我们的 `utils/gym_compat.py`）。
-
----
-
-## 任务说明（KUKA iiwa Reach）
-
-- **目标**：七自由度机械臂末端（EEF）到达随机球目标点。
-- **观测**：关节/末端/目标等特征（Dict 或向量）；脚本已支持将 Dict 展平。
-- **奖励**：当前默认 **全程稠密奖励**（越近越好、到阈值结束）。
-- **成功判据**：EEF 与目标距离 < `distance_threshold`（环境内可配置，默认 0.05 m）。
-
----
-
-## 训练（Train）
-
-**一条命令开始训练：**
-```bash
-python training/train_experiment.py --env KukaIiwa7Reach-v0
-```
-
-- 脚本会在 `results/` 里自动新建独立 run 目录并存储：
-  - `rewards.npy`、`success.npy`、`metrics.json`
-  - `final_model.pt` 与带时间戳的备份 `final_model_YYYYMMDD_HHMMSS.pt`
-  - `config.json`（保存本次训练配置）
-  - `results/LATEST_RUN.txt` 指向最近 run，便于 evaluate/test 自动读取
-
-**切换模型架构**  
-`training/train_experiment.py` 最下方有一处：
-```python
-arch = "gnn_transformer"  # "mlp" / "gnn" / "transformer" / "gnn_transformer"
-```
-将其改为你想要的架构后保存，再运行训练即可。
-
-**常用参数（在脚本内默认即可）：**
-- `--max_timesteps`（总步数，默认 300k）
-- `--start_timesteps`（纯随机探索步数，默认 25k）
-- `--eval_freq`（评估间隔步数，默认 10k）
-- `--batch_size`（默认 256）
-- `--expl_noise`（训练时动作高斯噪声，成功率↑后脚本会自动降噪）
-
-> 训练中记录的 **loss 横轴** 是“全局步数”，而不是训练迭代次数；这是为了与 TD3 的延迟 Actor 更新语义一致。
-
----
-
-## 评估（Evaluate → 输出到 `./plots/<run名称>/`）
-
-```bash
-# 默认读取最近一次 run（results/LATEST_RUN.txt），图片输出到 ./plots/<run名称>/
-python training/evaluate.py
-
-# 或指定某次 run：
-python training/evaluate.py --run_dir results/<你的run目录>
-```
-
-**生成的图像（Times New Roman 字体，自动防覆盖）：**
-- `rewards.png`：训练每回合奖励
-- `success.png`：训练每回合成功标记 + 移动平均
-- `train_losses.png`：Actor/Critic Loss（横轴为全局步数）
-- `loss_average.png`：Actor/Critic 平均损失柱状图
-- `eval_metrics.png`：评估 Reward / Success / TTS（成功所用步数） / Min Distance（最小距离）
-
-> 可选：`--ma_window` 调整成功率平滑窗口（默认 20）。
-
----
-
-## 测试（Test → 随机 30 点 + 最优轨迹 → 输出到 `./plots_result/`）
-
-```bash
-# 默认读取最近一次 run；评估 30 个随机起点/目标；GUI 可视化；输出图片在 ./plots_result/
-python training/test_agent.py
-
-# 指定 run 或评估回合数：
-python training/test_agent.py --run_dir results/<你的run目录> --episodes 50
-```
-
-**输出图像：**
-- `*_eval_curves.png`：四合一曲线（回合奖励、成功标记、TTS、最小距离）
-- `*_hist.png`：TTS 与最小距离的直方图
-- `*_best_trajectory.png`：**最优回合（按最小距离）末端 3D 轨迹**（带起点/终点/目标）
-
-> 如需固定测试点以复现实验，可在 `test_agent.py` 中增加 `--seed` 和 `--same_every_episode`（README 末尾“可选增强”有示例）。
-
----
-
-## 重要实现说明
-
-### 1) 设备与数据类型健壮性
-- `td3_agent.py` 的 `train()` 对 ReplayBuffer 的输出统一 `torch.as_tensor(..., device=self.device)`，兼容 **numpy / torch** 返回，避免 `.to(...)` 报错。  
-- 训练脚本会记录 `actor/critic loss` 与对应全局步数，评估脚本按“全局步数”作图，便于横向对齐。
-
-### 2) 稠密奖励与早停策略
-- 全程稠密奖励（训练/评估），到达阈值即提前终止回合，提升样本效率。
-- 评估成功率 ≥ 0.95 连续三次时触发**早停**并保存最终模型（同时保留时间戳副本）。
-
-### 3) 结果与路径组织
-- 每次训练各自在 `results/<env>_<arch>_dense_<timestamp>/` 中存档。
-- `evaluate.py` 输出到 `plots/<run名称>/`；`test_agent.py` 输出到 `plots_result/`（带时间戳防覆盖）。
-
----
-
-## 常见问题（FAQ）
-
-**Q1：报 “Gym has been unmaintained since 2022…”**  
-A：无影响。本项目用的是 `gymnasium`，并通过 `utils/gym_compat.py` 适配了新老接口。
-
-**Q2：Windows 上 `agents` 名称冲突**  
-A：`training/*.py` 顶部已将项目根目录提前加入 `sys.path`，优先使用你项目内的 `agents/`。
-
-**Q3：训练太慢？**  
-- 关闭 GUI：训练脚本用的是 `render_mode="direct"`（无 GUI）。
-- 降低 `eval_freq`、减小 `max_timesteps` 或 `batch_size`（会影响效果）。
-- 确认 PyTorch 在 GPU 上运行（`torch.cuda.is_available()`）。
-
-**Q4：成功率高但奖励仍为负？**  
-Reach 任务常见：稠密奖励是“负距离”一类形态，收敛到 **小负数**是合理的；更关心 **成功率 / 最小距离 / TTS**。
-
----
-
-## 可选增强（按需启用）
-
-- **固定测试集以复现实验**：给 `test_agent.py` 增加参数 `--seed`、`--same_every_episode`，用同一套随机点对比不同模型（代码片段可向我索取）。
-- **导出论文风格 PDF 图**：在 `evaluate.py / test_agent.py` 的保存函数中并行保存 `.pdf`，打印更清晰。
-- **HER + 稀疏奖励**：若将来要切到稀疏，建议同步打开 HER 并重建经验池，以免旧稠密样本干扰策略。
-
----
-
-## 许可与引用
-
-- 本项目基于标准 PyTorch / Gymnasium / PyBullet 生态实现。若用于论文或公开项目，请注明：
-  - “TD3 Multi‑Architecture for KUKA LBR iiwa (PyBullet), 2025-09-04”
-  - 并引用原始 TD3 论文：Fujimoto et al., “Addressing Function Approximation Error in Actor-Critic Methods”, ICML 2018.
-
----
-
-**最后更新：** 2025-09-04 03:04:17  
-如需我帮你把训练/测试脚本再加上更多指标或导出表格（CSV/Excel），直接告诉我即可。
+如果本项目用于课程、科研或二次开发，请同时注明 PyTorch、Gymnasium 与 PyBullet。

@@ -1,0 +1,8 @@
+torch>=2.0
+numpy>=1.21
+pandas
+matplotlib
+tensorboard
+pyyaml
+gymnasium>=0.28
+pybullet

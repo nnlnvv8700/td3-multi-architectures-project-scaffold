@@ -2,7 +2,6 @@
 import os, sys, json, argparse, csv
 import numpy as np
 import torch
-import torch.nn as nn
 try:
     import gymnasium as gym
 except ImportError:
@@ -32,135 +31,8 @@ except Exception:
     pass
 
 from agents.td3_agent import TD3
+from training.observation import flatten_obs, infer_dimensions
 from utils.gym_compat import reset_env, step_env
-
-
-def flatten_obs(obs):
-    if isinstance(obs, dict):
-        return np.concatenate(
-            [obs["observation"], obs["achieved_goal"], obs["desired_goal"]],
-            axis=0,
-        ).astype(np.float32)
-    else:
-        return np.array(obs, dtype=np.float32)
-
-
-class LegacyKukaStateEncoder(nn.Module):
-    """Compatibility encoder for old checkpoints that expected 7xnode_dim without joint-id embedding."""
-
-    def __init__(self, node_dim=6):
-        super().__init__()
-        self.node_dim = int(node_dim)
-
-    def forward(self, state):
-        batch_size = state.shape[0]
-        joint_pos = state[:, 0:7]
-        joint_vel = state[:, 7:14]
-        achieved = state[:, 14:17]
-        desired = state[:, 17:20]
-
-        goal_vector = desired - achieved
-        goal_dist = torch.norm(goal_vector, dim=1, keepdim=True).clamp_min(1e-6)
-        goal_dir = goal_vector / goal_dist
-        goal_dist_norm = goal_dist / 1.2
-        joint_vel_norm = joint_vel / 1.5
-        joint_pos_cum = torch.cumsum(joint_pos, dim=1) / (7 * 3.0)
-
-        if self.node_dim == 6:
-            goal_dist_feat = goal_dist_norm.expand(-1, 7)
-            goal_dir_x = goal_dir[:, 0:1].expand(-1, 7)
-            goal_dir_y = goal_dir[:, 1:2].expand(-1, 7)
-            nodes = torch.stack([
-                joint_pos, joint_vel_norm, joint_pos_cum,
-                goal_dist_feat, goal_dir_x, goal_dir_y
-            ], dim=2)
-        elif self.node_dim == 5:
-            goal_dist_feat = goal_dist_norm.expand(-1, 7)
-            goal_dir_x = goal_dir[:, 0:1].expand(-1, 7)
-            nodes = torch.stack([
-                joint_pos, joint_vel_norm, joint_pos_cum,
-                goal_dist_feat, goal_dir_x
-            ], dim=2)
-        elif self.node_dim == 4:
-            goal_dist_feat = goal_dist_norm.expand(-1, 7)
-            nodes = torch.stack([joint_pos, joint_vel_norm, goal_dist_feat, joint_pos_cum], dim=2)
-        else:
-            goal_dist_feat = goal_dist_norm.expand(-1, 7)
-            nodes = torch.stack([joint_pos, joint_vel_norm, goal_dist_feat], dim=2)
-        return nodes.reshape(batch_size, -1)
-
-
-class LegacyKukaPositionalEncoding(nn.Module):
-    """Compatibility module that matches old checkpoint keys."""
-
-    def __init__(self, num_nodes=7, d_model=128):
-        super().__init__()
-        pe = torch.zeros(num_nodes, d_model)
-        dist = torch.zeros(num_nodes, num_nodes, dtype=torch.long)
-        for i in range(num_nodes):
-            for j in range(num_nodes):
-                dist[i, j] = abs(i - j)
-        hw = torch.linspace(0.8, 1.2, num_nodes)
-        self.register_buffer("pe", pe)
-        self.register_buffer("dist_matrix", dist)
-        self.register_buffer("hierarchy_weights", hw)
-        self.distance_embed = nn.Embedding(num_nodes, d_model)
-
-    def forward(self, x):
-        dist_emb = self.distance_embed(self.dist_matrix).mean(dim=1)
-        return x + self.pe.unsqueeze(0) + 0.10 * dist_emb.unsqueeze(0)
-
-
-class LegacyGNNTransformerActor(nn.Module):
-    """Compatibility actor for older gnn_transformer checkpoints."""
-
-    def __init__(self, node_dim, num_nodes, action_dim, max_action=1.0):
-        super().__init__()
-        self.num_nodes = int(num_nodes)
-        self.node_dim = int(node_dim)
-        self.max_action = float(max_action)
-        self.state_encoder = LegacyKukaStateEncoder(node_dim=self.node_dim)
-        self.node_mlp = nn.Sequential(
-            nn.Linear(self.node_dim, 64),
-            nn.LeakyReLU(0.1),
-            nn.Linear(64, 64),
-            nn.LeakyReLU(0.1),
-        )
-        adj = torch.zeros(self.num_nodes, self.num_nodes, dtype=torch.float32)
-        for i in range(self.num_nodes - 1):
-            adj[i, i + 1] = 1.0
-            adj[i + 1, i] = 1.0
-        self.register_buffer("adjacency", adj)
-        self.input_proj = nn.Linear(64, 128)
-        self.pos_encoding = LegacyKukaPositionalEncoding(num_nodes=self.num_nodes, d_model=128)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=128,
-            nhead=4,
-            dim_feedforward=2048,
-            dropout=0.0,
-            activation="relu",
-            batch_first=True,
-            norm_first=False,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        self.readout = nn.Sequential(
-            nn.Linear(self.num_nodes * 128, 256),
-            nn.ELU(),
-            nn.Linear(256, action_dim),
-        )
-
-    def forward(self, x):
-        b = x.shape[0]
-        nodes = self.state_encoder(x).view(b, self.num_nodes, self.node_dim)
-        h = self.node_mlp(nodes)
-        adj = self.adjacency.unsqueeze(0).expand(b, -1, -1)
-        deg = adj.sum(dim=-1, keepdim=True).clamp_min(1.0)
-        h = 0.5 * h + 0.5 * torch.bmm(adj / deg, h)
-        t = self.input_proj(h)
-        t = self.pos_encoding(t)
-        t = self.transformer(t)
-        feat = t.reshape(b, -1)
-        return self.max_action * torch.tanh(self.readout(feat))
 
 
 def read_latest_run(results_root="./results"):
@@ -211,11 +83,10 @@ def read_run_config(run_dir):
     return {}
 
 
-def resolve_arch_defaults(actor_arch):
-    """与训练时约定一致：mlp -> None/None；其余 -> 5/4"""
+def resolve_arch_defaults(actor_arch, observation_version=2):
     if actor_arch == "mlp":
         return None, None
-    return 5, 4
+    return (6, 7) if observation_version >= 2 else (5, 4)
 
 
 def resolve_inputs(args):
@@ -261,9 +132,14 @@ def resolve_inputs(args):
     return run_dir, model_path, run_cfg
 
 
-def build_env(env_id, dense_reward_flag=True, render_mode="human"):
+def build_env(env_id, dense_reward_flag=True, observation_version=2, render_mode="rgb_array"):
     try:
-        env = gym.make(env_id, render_mode=render_mode, dense_reward=bool(dense_reward_flag))
+        env = gym.make(
+            env_id,
+            render_mode=render_mode,
+            dense_reward=bool(dense_reward_flag),
+            observation_version=int(observation_version),
+        )
     except TypeError:
         env = gym.make(env_id, render_mode=render_mode)
     return env
@@ -275,13 +151,6 @@ def _select_action_eval(agent, state_vec):
         return agent.select_action(state_vec, deterministic=True)
     except TypeError:
         return agent.select_action(state_vec)
-
-
-def _select_action_eval_actor(actor, state_vec):
-    state_t = torch.as_tensor(state_vec, dtype=torch.float32).unsqueeze(0)
-    with torch.no_grad():
-        action = actor(state_t).cpu().numpy()[0]
-    return action
 
 
 def _extract_positions(obs, info, env):
@@ -353,43 +222,6 @@ def safe_savefig(fig, out_dir, filename_base):
             fig.savefig(cand, bbox_inches="tight")
             plt.close(fig); return cand
         i += 1
-
-
-def safe_save_image(image, out_dir, filename_base):
-    safe_mkdir(out_dir)
-    base = os.path.join(out_dir, filename_base)
-    path = base + ".png"
-    image_uint8 = np.asarray(image, dtype=np.uint8)
-    if not os.path.exists(path):
-        plt.imsave(path, image_uint8)
-        return path
-    i = 1
-    while True:
-        cand = f"{base}_{i}.png"
-        if not os.path.exists(cand):
-            plt.imsave(cand, image_uint8)
-            return cand
-        i += 1
-
-
-def stylize_pybullet_frame(image):
-    img = np.asarray(image, dtype=np.float32).copy()
-    h, w, _ = img.shape
-
-    y = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None, None]
-    sky_top = np.array([171.0, 204.0, 236.0], dtype=np.float32).reshape(1, 1, 3)
-    sky_bottom = np.array([225.0, 236.0, 247.0], dtype=np.float32).reshape(1, 1, 3)
-    sky = sky_top * (1.0 - y) + sky_bottom * y
-
-    white_mask = (
-        (img.mean(axis=2, keepdims=True) > 205.0) &
-        ((img.max(axis=2, keepdims=True) - img.min(axis=2, keepdims=True)) < 45.0)
-    ).astype(np.float32)
-
-    upper_weight = np.clip(1.0 - (np.arange(h, dtype=np.float32)[:, None, None] / (0.78 * h)), 0.0, 1.0)
-    mask = white_mask * upper_weight
-    img = img * (1.0 - mask) + sky * mask
-    return np.clip(img, 0.0, 255.0).astype(np.uint8)
 
 
 def plot_metrics_basic(out_dir, rewards, success, tts, min_d, run_basename):
@@ -518,7 +350,8 @@ def run_test(args):
 
     # 解析 actor 架构与默认 node_dim/num_nodes（避免 int(None) 报错）
     actor_arch = run_cfg.get("actor_arch", args.actor_arch)
-    def_node_dim, def_num_nodes = resolve_arch_defaults(actor_arch)
+    observation_version = int(run_cfg.get("observation_version", 1))
+    def_node_dim, def_num_nodes = resolve_arch_defaults(actor_arch, observation_version)
     node_dim_cfg = run_cfg.get("node_dim", None)
     num_nodes_cfg = run_cfg.get("num_nodes", None)
     node_dim = node_dim_cfg if node_dim_cfg is not None else (args.node_dim if args.node_dim is not None else def_node_dim)
@@ -538,23 +371,18 @@ def run_test(args):
     print(f"  node_dim     : {node_dim}")
     print(f"  num_nodes    : {num_nodes}")
     print(f"  稠密奖励     : {dense_reward_flag}")
+    print(f"  观测版本     : v{observation_version}")
     print(f"  运行目录     : {run_dir}")
     print(f"  模型权重     : {model_path}")
     print(f"  输出目录     : {out_dir}")
     print(f"  测试回合数   : {args.episodes}（随机目标/起点，每回合不同）")
 
     # 创建环境（GUI）
-    env = build_env(args.env, dense_reward_flag, render_mode=args.render_mode)
+    env = build_env(args.env, dense_reward_flag, observation_version, args.render_mode)
+    env.action_space.seed(args.seed)
 
     # 维度
-    if hasattr(env.observation_space, "spaces") and "observation" in env.observation_space.spaces:
-        obs_dim = env.observation_space["observation"].shape[0]
-        goal_dim = env.observation_space["achieved_goal"].shape[0]
-        state_dim = obs_dim + 2 * goal_dim
-    else:
-        state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-    max_action = float(env.action_space.high[0])
+    state_dim, action_dim, max_action = infer_dimensions(env)
 
     # 构造“伪 cfg”传入 TD3
     class _Cfg:
@@ -563,35 +391,31 @@ def run_test(args):
     cfg.actor_arch = actor_arch
     cfg.node_dim = node_dim
     cfg.num_nodes = num_nodes
+    cfg.use_state_encoder = bool(run_cfg.get(
+        "use_state_encoder",
+        actor_arch != "mlp" and observation_version >= 2,
+    ))
+    cfg.use_kuka_pe = bool(run_cfg.get("use_kuka_pe", True))
+    cfg.max_timesteps = int(run_cfg.get("max_timesteps", 500_000))
+    cfg.start_timesteps = int(run_cfg.get("start_timesteps", 25_000))
     cfg.batch_size = getattr(args, "batch_size", 256)
     cfg.expl_noise = 0.0  # 测试不用外部噪声
 
     # 初始化 TD3 并加载权重
-    agent = TD3(state_dim, action_dim, max_action, cfg)
-    sd = torch.load(model_path, map_location="cpu")
-    policy_actor = agent.actor
-    use_legacy_actor = False
+    checkpoint_max_action = max_action if observation_version >= 2 else 1.0
+    agent = TD3(state_dim, action_dim, checkpoint_max_action, cfg)
+    try:
+        sd = torch.load(model_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        sd = torch.load(model_path, map_location="cpu")
     try:
         agent.actor.load_state_dict(sd)
-    except RuntimeError:
-        is_legacy_gnn_transformer = (
-            actor_arch == "gnn_transformer"
-            and "pos_encoding.pe" in sd
-            and "readout.0.weight" in sd
-            and tuple(sd["readout.0.weight"].shape) == (256, 896)
-        )
-        if not is_legacy_gnn_transformer:
-            raise
-        print("[信息] 检测到旧版 gnn_transformer 权重，切换兼容评估模式")
-        policy_actor = LegacyGNNTransformerActor(
-            node_dim=node_dim,
-            num_nodes=num_nodes,
-            action_dim=action_dim,
-            max_action=max_action,
-        )
-        policy_actor.load_state_dict(sd, strict=True)
-        use_legacy_actor = True
-    policy_actor.eval()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "模型权重与当前 Actor 定义不匹配。该 run 可能来自更早的网络实现；"
+            "请使用对应历史代码，或用当前统一训练入口重新训练。"
+        ) from exc
+    agent.actor.eval()
 
     # 评估并记录若干随机点（默认 30）
     ep_rewards, ep_success, ep_tts, ep_min_d = [], [], [], []
@@ -599,19 +423,9 @@ def run_test(args):
     rmses, max_devs, end_errs, path_len_exec, path_len_ref = [], [], [], [], []
     best_idx_by_min_d = None
     best_min_d_val = float("inf")
-    screenshot_path = None
 
     for ep in range(args.episodes):
-        obs, info = reset_env(env)  # 不设种子 => 随机点
-        if args.save_pybullet_screenshot and screenshot_path is None:
-            frame = env.unwrapped.render(width=args.screenshot_width, height=args.screenshot_height)
-            if frame is not None:
-                frame = stylize_pybullet_frame(frame)
-                screenshot_path = safe_save_image(
-                    frame,
-                    out_dir,
-                    f"{run_basename}_pybullet_task_scene_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                )
+        obs, info = reset_env(env, seed=args.seed + ep)
         done = False
         total_reward = 0.0
         tts = None
@@ -632,10 +446,7 @@ def run_test(args):
         while not done:
             state = flatten_obs(obs)
             with torch.no_grad():
-                if use_legacy_actor:
-                    action = _select_action_eval_actor(policy_actor, state)
-                else:
-                    action = _select_action_eval(agent, state)
+                action = _select_action_eval(agent, state)
             obs, reward, done, info = step_env(env, action)
             total_reward += float(reward)
 
@@ -665,16 +476,6 @@ def run_test(args):
         ep_paths.append(exec_path)
         ep_goals.append(g if g is not None else g0)
         ep_refs.append(ref_traj)
-        if False and args.save_pybullet_screenshot and screenshot_path is None and exec_path is not None:
-            env.unwrapped.add_trajectory_overlay(exec_path, ref_path=ref_traj)
-            frame = env.unwrapped.render(width=args.screenshot_width, height=args.screenshot_height)
-            if frame is not None:
-                frame = stylize_pybullet_frame(frame)
-                screenshot_path = safe_save_image(
-                    frame,
-                    out_dir,
-                    f"{run_basename}_pybullet_traj_scene_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                )
 
         # 轨迹指标（如果没有 ref_traj 则为 NaN）
         if exec_path is not None:
@@ -720,8 +521,6 @@ def run_test(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_basename_ts = f"{run_basename}_{timestamp}"
     saved_paths = []
-    if screenshot_path:
-        saved_paths.append(screenshot_path)
 
     # 基础评估图
     saved_paths += plot_metrics_basic(out_dir, ep_rewards, ep_success, ep_tts, ep_min_d, run_basename_ts)
@@ -793,17 +592,12 @@ if __name__ == "__main__":
                         help="也可直接指定 .pt/.pth 文件，或包含权重的目录")
     parser.add_argument("--episodes", type=int, default=30,
                         help="评估回合数（默认 30，随机起点/目标）")
+    parser.add_argument("--seed", type=int, default=10000,
+                        help="固定测试目标集合的起始随机种子")
+    parser.add_argument("--render_mode", choices=["human", "rgb_array"], default="rgb_array",
+                        help="默认无GUI评估；需要观察仿真时传 human")
 
     # 当 config.json 缺失/字段为 None 时的回退参数
-    parser.add_argument("--render_mode", type=str, default="human",
-                        choices=["human", "rgb_array"],
-                        help="PyBullet rendering mode used during evaluation")
-    parser.add_argument("--save_pybullet_screenshot", action="store_true",
-                        help="save one PyBullet screenshot to plots_result for paper figures")
-    parser.add_argument("--screenshot_width", type=int, default=1280,
-                        help="saved PyBullet screenshot width")
-    parser.add_argument("--screenshot_height", type=int, default=720,
-                        help="saved PyBullet screenshot height")
     parser.add_argument("--actor_arch", type=str, default="gnn_transformer",
                         choices=["mlp", "gnn", "transformer", "gnn_transformer"])
     parser.add_argument("--node_dim", type=int, default=None)

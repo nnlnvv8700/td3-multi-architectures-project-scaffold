@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # training/plot_compare_grids_scientific.py
 # 用法示例（PowerShell）：
-#  python ".\training\evaluate.py" --run_dirs `
-#    ".\results\new\KukaIiwa7Track-v0_mlp_dense_20251119_215119" `
-#    ".\results\new\KukaIiwa7Track-v0_gnn_dense_20251115_131235" `
-#    ".\results\new\KukaIiwa7Track-v0_transformer_dense_20251203_211254" `
-#    ".\results\new\KukaIiwa7Track-v0_gnn_transformer_dense_20251203_231625"
+# python ".\training\evaluate.py" --run_dirs `
+#   ".\results\KukaIiwa7Track-v0_mlp_dense_20251115_200935" `
+#   ".\results\KukaIiwa7Track-v0_gnn_dense_20251115_151707" `
+#   ".\results\KukaIiwa7Track-v0_transformer_dense_20251115_173620" `
+#   ".\results\KukaIiwa7Track-v0_gnn_transformer_dense_20251115_131235"
 
 import os
 import json
@@ -32,7 +32,9 @@ TICK_FS       = 11
 TITLE_FS      = 12
 LEGEND_FS     = 11
 LINE_W        = 1.8
-MARKER_SIZE   = 3.2
+LINE_ALPHA    = 0.85       # 线条透明度，避免完全覆盖
+MARKER_SIZE   = 4.5        # 增大marker便于区分
+MARKER_ALPHA  = 0.7        # marker透明度
 GRID_ALPHA    = 0.25
 
 COLOR_MAP = {
@@ -42,13 +44,18 @@ COLOR_MAP = {
     "GNN+Transformer": "#d62728" # 红（含 gat_transformer）
 }
 
+MARKER_MAP = {
+    "MLP": "o",                  # 圆形
+    "GNN": "s",                  # 方形
+    "Transformer": "^",          # 三角形
+    "GNN+Transformer": "D"       # 菱形
+}
+
 def infer_label_from_run(run_dir: str) -> str:
     name = os.path.basename(os.path.normpath(run_dir)).lower()
-    # 先检查组合模型（顺序很重要）
-    if "gnn_transformer" in name or "gat_transformer" in name or "gnntransformer" in name:
+    if "gnn_transformer" in name or "gat_transformer" in name:
         return "GNN+Transformer"
-    # 再检查单一模型
-    if "transformer" in name:
+    if "transformer" in name and "gnn" not in name:
         return "Transformer"
     if "mlp" in name:
         return "MLP"
@@ -116,92 +123,51 @@ def style_axes(ax, xlabel=True, ylabel=None, letter=None):
         ax.text(0.0, 1.02, f"({letter})", transform=ax.transAxes,
                 fontsize=AX_LABEL_FS, fontweight="bold")
 
-def plot_panel(ax, series_dict, title, ylabel, letter, show_ma=False, fill=False, show_shade=False, shade_max=None, shade_min=None, shade_boost=1.0, shade_start_idx=0):
-    # 固定顺序：MLP, GNN, Transformer, GNN+Transformer
-    fixed_order = ["MLP", "GNN", "Transformer", "GNN+Transformer"]
-    ordered_labels = [lab for lab in fixed_order if lab in series_dict]
-    
-    # 不同模型的基础阴影带比例
-    shade_ratios = {
-        "MLP": 0.10,
-        "GNN": 0.08,
-        "Transformer": 0.09,
-        "GNN+Transformer": 0.07
-    }
-    
-    for lab in ordered_labels:
-        x, y, color, x_ma, y_ma = series_dict[lab]
-        if y is None or len(y) == 0: 
+def plot_panel(ax, series_dict, title, ylabel, letter, show_ma=False, fill=False):
+    # 按标签固定顺序绘制，避免随机覆盖
+    plot_order = ["MLP", "GNN", "Transformer", "GNN+Transformer"]
+    for lab in plot_order:
+        if lab not in series_dict:
             continue
+        x, y, color, x_ma, y_ma = series_dict[lab]
+        if y is None or len(y) == 0:
+            continue
+
+        marker = MARKER_MAP.get(lab, 'o')
         xi = np.arange(1, len(y) + 1, dtype=float) if x is None else np.asarray(x)[:len(y)]
-        ax.plot(xi, y, label=lab, color=color, linewidth=LINE_W)
-        
-        # 添加不均匀的阴影区域（基于局部波动）
-        if show_shade:
-            ratio = shade_ratios.get(lab, 0.10)
-            # 计算局部标准差（使用滑动窗口）
-            window = min(10, len(y) // 10)
-            if window < 3:
-                window = 3
-            
-            y_std = np.zeros_like(y)
-            for i in range(len(y)):
-                start = max(0, i - window // 2)
-                end = min(len(y), i + window // 2 + 1)
-                local_std = np.std(y[start:end]) if end - start > 1 else np.abs(y[i]) * ratio
-                # 结合固定比例和局部波动，应用增强系数
-                # 后半段阴影加大：索引超过一半时应用额外增强
-                boost = shade_boost
-                if i > len(y) // 2:
-                    boost *= 1.5
-                y_std[i] = max(local_std * 1.5, np.abs(y[i]) * ratio) * boost
-            
-            # 计算阴影带上下边界
-            y_upper = y + y_std
-            y_lower = y - y_std
-            
-            # 如果设置了最大值限制，裁剪阴影带上边界
-            if shade_max is not None:
-                y_upper = np.minimum(y_upper, shade_max)
-            
-            # 如果设置了最小值限制，裁剪阴影带下边界
-            if shade_min is not None:
-                y_lower = np.maximum(y_lower, shade_min)
-            
-            # 只绘制从shade_start_idx开始的阴影
-            if shade_start_idx > 0 and shade_start_idx < len(xi):
-                xi_shade = xi[shade_start_idx:]
-                y_lower_shade = y_lower[shade_start_idx:]
-                y_upper_shade = y_upper[shade_start_idx:]
-                ax.fill_between(xi_shade, y_lower_shade, y_upper_shade, 
-                               color=color, alpha=0.2, linewidth=0)
-            else:
-                ax.fill_between(xi, y_lower, y_upper, 
-                               color=color, alpha=0.2, linewidth=0)
+
+        xi_limited = xi
+        y_limited = y
+
+        # 绘制原始数据点（带透明度，稀疏marker避免拥挤）
+        marker_every = max(1, len(y_limited) // 15)  # 每15个点显示一个marker
+        ax.plot(xi_limited, y_limited, label=lab, color=color, linewidth=LINE_W,
+                marker=marker, markersize=MARKER_SIZE, alpha=LINE_ALPHA,
+                markerfacecolor=color, markeredgecolor='white', markeredgewidth=0.5,
+                markevery=marker_every, zorder=5)
         if show_ma and y_ma is not None and len(y_ma) > 0:
-            ax.plot(x_ma if x_ma is not None else np.arange(1, len(y_ma)+1),
-                    y_ma, color=color, linewidth=LINE_W+0.2, linestyle='-')
-            if fill:
-                # 构造一个简易的“均值±10%”半透明带，突出趋势（没有方差数据时的折中展示）
-                band = 0.10 * np.abs(y_ma)
-                low, high = y_ma - band, y_ma + band
-                ax.fill_between(x_ma if x_ma is not None else np.arange(1, len(y_ma)+1),
-                                low, high, color=color, alpha=0.12, linewidth=0)
+            x_ma_plot = x_ma if x_ma is not None else np.arange(1, len(y_ma)+1)
+            x_ma_limited = x_ma_plot
+            y_ma_limited = y_ma
+
+            # 滑动平均线（更粗，稍微透明，在上层）
+            ax.plot(x_ma_limited, y_ma_limited, color=color, linewidth=LINE_W+0.5,
+                    linestyle='-', alpha=0.9, zorder=10)
     ax.set_title(title, fontsize=TITLE_FS)
     style_axes(ax, xlabel=True, ylabel=ylabel, letter=letter)
 
 def unified_legend(fig, labels_order):
-    # 固定顺序：MLP, GNN, Transformer, GNN+Transformer
-    fixed_order = ["MLP", "GNN", "Transformer", "GNN+Transformer"]
-    # 只显示实际存在的标签
-    ordered_labels = [lab for lab in fixed_order if lab in labels_order]
-    
     handles = []
-    for lab in ordered_labels:
-        (h,) = plt.plot([], [], color=COLOR_MAP.get(lab), label=lab, linewidth=LINE_W)
+    for lab in labels_order:
+        marker = MARKER_MAP.get(lab, 'o')
+        (h,) = plt.plot([], [], color=COLOR_MAP.get(lab), label=lab,
+                       linewidth=LINE_W, marker=marker, markersize=MARKER_SIZE,
+                       alpha=LINE_ALPHA, markerfacecolor=COLOR_MAP.get(lab),
+                       markeredgecolor='white', markeredgewidth=0.5)
         handles.append(h)
-    fig.legend(handles, ordered_labels, loc="center left",
-               bbox_to_anchor=(0.88, 0.5), frameon=True, fontsize=LEGEND_FS)
+    fig.legend(handles, labels_order, loc="center left",
+               bbox_to_anchor=(0.88, 0.5), frameon=True, fontsize=LEGEND_FS,
+               fancybox=True, shadow=True)
 
 def save_all(fig, out_png_base):
     png = out_png_base + ".png"
@@ -218,8 +184,7 @@ def main():
     ap.add_argument("--run_dirs", type=str, nargs="+", required=True, help="多个训练结果目录")
     ap.add_argument("--out", type=str, default=None, help="输出目录（默认 plots/compare_scientific_时间戳）")
     ap.add_argument("--ma_window", type=int, default=0, help="可选：滑动平均窗口（0=关闭）")
-    ap.add_argument("--fill_band", action="store_true", help="在滑动平均上绘制±10%半透明带")
-    ap.add_argument("--show_shade", action="store_true", help="在曲线周围绘制±10%阴影带")
+    ap.add_argument("--fill_band", action="store_true", help="已弃用；不再绘制伪造的±10%不确定性带")
     args = ap.parse_args()
 
     out_dir = args.out or os.path.join("plots", f"compare_scientific_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -234,10 +199,10 @@ def main():
 
     fig1 = plt.figure(figsize=(12.6, 6.2))
     gs1 = fig1.add_gridspec(2, 2, left=0.07, right=0.84, top=0.96, bottom=0.09, hspace=0.35, wspace=0.28)
-    ax11 = fig1.add_subplot(gs1[0, 0]); plot_panel(ax11, s_reward, "Eval Reward (avg)", "Value", "a", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax12 = fig1.add_subplot(gs1[0, 1]); plot_panel(ax12, s_succ,  "Eval Success Rate (avg)", "Value", "b", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax13 = fig1.add_subplot(gs1[1, 0]); plot_panel(ax13, s_tts,   "Eval Time To Success (avg)", "Value", "c", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax14 = fig1.add_subplot(gs1[1, 1]); plot_panel(ax14, s_mind,  "Eval Min Distance (avg)", "Value", "d", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
+    ax11 = fig1.add_subplot(gs1[0, 0]); plot_panel(ax11, s_reward, "Eval Reward (avg)", "Value", "a", show_ma=bool(args.ma_window), fill=args.fill_band)
+    ax12 = fig1.add_subplot(gs1[0, 1]); plot_panel(ax12, s_succ,  "Eval Success Rate (avg)", "Value", "b", show_ma=bool(args.ma_window), fill=args.fill_band)
+    ax13 = fig1.add_subplot(gs1[1, 0]); plot_panel(ax13, s_tts,   "Eval Time To Success (avg)", "Value", "c", show_ma=bool(args.ma_window), fill=args.fill_band)
+    ax14 = fig1.add_subplot(gs1[1, 1]); plot_panel(ax14, s_mind,  "Eval Min Distance (avg)", "Value", "d", show_ma=bool(args.ma_window), fill=args.fill_band)
     unified_legend(fig1, labels1)
     save_all(fig1, os.path.join(out_dir, "compare_basic"))
 
@@ -250,32 +215,12 @@ def main():
 
     fig2 = plt.figure(figsize=(12.6, 6.2))
     gs2 = fig2.add_gridspec(2, 2, left=0.07, right=0.84, top=0.96, bottom=0.09, hspace=0.35, wspace=0.28)
-    ax21 = fig2.add_subplot(gs2[0, 0]); plot_panel(ax21, s_rmse, "Eval RMSE (avg)", "Value", "a", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax22 = fig2.add_subplot(gs2[0, 1]); plot_panel(ax22, s_maxd, "Eval Max Deviation (avg)", "Value", "b", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax23 = fig2.add_subplot(gs2[1, 0]); plot_panel(ax23, s_end,  "Eval End-Point Error (avg)", "Value", "c", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax24 = fig2.add_subplot(gs2[1, 1]); plot_panel(ax24, s_plen, "Eval Path Length (avg)", "Value", "d", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
+    ax21 = fig2.add_subplot(gs2[0, 0]); plot_panel(ax21, s_rmse, "Eval RMSE (avg)", "Value", "a", show_ma=bool(args.ma_window), fill=args.fill_band)
+    ax22 = fig2.add_subplot(gs2[0, 1]); plot_panel(ax22, s_maxd, "Eval Max Deviation (avg)", "Value", "b", show_ma=bool(args.ma_window), fill=args.fill_band)
+    ax23 = fig2.add_subplot(gs2[1, 0]); plot_panel(ax23, s_end,  "Eval End-Point Error (avg)", "Value", "c", show_ma=bool(args.ma_window), fill=args.fill_band)
+    ax24 = fig2.add_subplot(gs2[1, 1]); plot_panel(ax24, s_plen, "Eval Path Length (avg)", "Value", "d", show_ma=bool(args.ma_window), fill=args.fill_band)
     unified_legend(fig2, labels2)
     save_all(fig2, os.path.join(out_dir, "compare_traj"))
-
-    # -------- 图 3：RMS Accel / Jerk / Vel Var / Efficiency --------
-    labels3 = []
-    s_rms_accel = build_series(args.run_dirs, "eval_rms_accel", labels3, ma_window=args.ma_window)
-    s_jerk      = build_series(args.run_dirs, "eval_jerk", labels3, ma_window=args.ma_window)
-    s_vel_var   = build_series(args.run_dirs, "eval_vel_var", labels3, ma_window=args.ma_window)
-    s_eff       = build_series(args.run_dirs, "eval_efficiency", labels3, ma_window=args.ma_window)
-
-    fig3 = plt.figure(figsize=(12.6, 6.2))
-    gs3 = fig3.add_gridspec(2, 2, left=0.07, right=0.84, top=0.96, bottom=0.09, hspace=0.35, wspace=0.28)
-    ax31 = fig3.add_subplot(gs3[0, 0]); plot_panel(ax31, s_rms_accel, "Eval RMS Acceleration (avg)", "m/s²", "a", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax32 = fig3.add_subplot(gs3[0, 1]); plot_panel(ax32, s_jerk, "Eval Jerk (avg)", "m/s³", "b", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax33 = fig3.add_subplot(gs3[1, 0]); plot_panel(ax33, s_vel_var, "Eval Velocity Variance (avg)", "Value", "c", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    ax34 = fig3.add_subplot(gs3[1, 1]); plot_panel(ax34, s_eff, "Eval Path Efficiency (avg)", "Value", "d", show_ma=bool(args.ma_window), fill=args.fill_band, show_shade=False)
-    
-    # 为效率指标设置 y 轴范围 [0, 1]
-    ax34.set_ylim([0, 1])
-    
-    unified_legend(fig3, labels3)
-    save_all(fig3, os.path.join(out_dir, "compare_smoothness"))
 
     print(f"[Done] Output dir: {out_dir}")
 

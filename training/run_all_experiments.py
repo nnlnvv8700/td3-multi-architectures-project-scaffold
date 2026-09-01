@@ -64,6 +64,7 @@ class ExperimentRunner:
         self.parallel = parallel
         self.gpus = gpus or [0]
         self.base_save_dir = base_save_dir
+        self.base_seed = 42
         
         # 实验记录
         self.experiment_log: List[Dict] = []
@@ -100,7 +101,8 @@ class ExperimentRunner:
             "--env", self.env,
             "--actor_arch", architecture,
             "--max_timesteps", str(self.max_timesteps),
-            "--save_dir", self.base_save_dir
+            "--save_dir", self.base_save_dir,
+            "--seed", str(self.base_seed + run_id - 1),
         ]
         
         # 设置环境变量（GPU）

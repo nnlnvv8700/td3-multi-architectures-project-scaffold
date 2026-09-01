@@ -103,7 +103,8 @@ class PolicyEvaluator:
         self,
         env: gym.Env,
         agent: Any,
-        distance_threshold: float = 0.05
+        distance_threshold: float = 0.05,
+        seed: Optional[int] = 10000,
     ):
         """
         初始化评估器
@@ -116,6 +117,7 @@ class PolicyEvaluator:
         self.env = env
         self.agent = agent
         self.distance_threshold = distance_threshold
+        self.seed = seed
     
     def _select_action_deterministic(self, state: np.ndarray) -> np.ndarray:
         """
@@ -150,9 +152,9 @@ class PolicyEvaluator:
         else:
             return np.array(obs, dtype=np.float32)
     
-    def _reset_env(self, env: gym.Env) -> Tuple[Any, Dict]:
+    def _reset_env(self, env: gym.Env, seed: Optional[int] = None) -> Tuple[Any, Dict]:
         """兼容 gym 和 gymnasium 的 reset"""
-        result = env.reset()
+        result = env.reset(seed=seed) if seed is not None else env.reset()
         if isinstance(result, tuple):
             return result[0], result[1] if len(result) > 1 else {}
         else:
@@ -167,14 +169,14 @@ class PolicyEvaluator:
         else:  # gym: obs, reward, done, info
             return result
     
-    def evaluate_episode(self) -> Dict[str, Any]:
+    def evaluate_episode(self, seed: Optional[int] = None) -> Dict[str, Any]:
         """
         评估单个回合
         
         Returns:
             包含回合指标的字典
         """
-        obs, info = self._reset_env(self.env)
+        obs, info = self._reset_env(self.env, seed=seed)
         done = False
         total_reward = 0.0
         step_count = 0
@@ -263,7 +265,8 @@ class PolicyEvaluator:
         accumulator = MetricsAccumulator()
         
         for episode_idx in range(num_episodes):
-            episode_result = self.evaluate_episode()
+            episode_seed = None if self.seed is None else self.seed + episode_idx
+            episode_result = self.evaluate_episode(seed=episode_seed)
             
             accumulator.add_episode(
                 reward=episode_result["reward"],
@@ -302,7 +305,8 @@ class PolicyEvaluator:
 def evaluate_policy(
     agent: Any,
     env: gym.Env,
-    eval_episodes: int = 10
+    eval_episodes: int = 10,
+    seed: Optional[int] = 10000,
 ) -> Tuple[float, float, float, float, float, float, float, float, float]:
     """
     评估策略的便捷函数（保持向后兼容）
@@ -321,7 +325,7 @@ def evaluate_policy(
         >>> avg_reward, success_rate, tts, min_d, rmse, max_dev, end_err, pl_exec, pl_ref = metrics
     """
     distance_threshold = float(getattr(env.unwrapped, "distance_threshold", 0.05))
-    evaluator = PolicyEvaluator(env, agent, distance_threshold)
+    evaluator = PolicyEvaluator(env, agent, distance_threshold, seed=seed)
     result = evaluator.evaluate(num_episodes=eval_episodes, verbose=False)
     
     return (
