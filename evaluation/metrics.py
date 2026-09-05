@@ -137,7 +137,8 @@ def compute_episode_metrics(
 
     efficiency = path_efficiency(exec_len, ref_len)
     rms_accel, avg_jerk, vel_var = smoothness_metrics(exec_path, dt=dt)
-    energy = float(exec_len ** 2) if not np.isnan(exec_len) else float("nan")
+    # Path length squared has no units of energy; torque/velocity power is not recorded.
+    energy = float("nan")
 
     record: Dict[str, Any] = {
         "episode_idx": int(episode_idx),
@@ -157,10 +158,12 @@ def compute_episode_metrics(
         "avg_jerk": avg_jerk,
         "vel_var": vel_var,
         "energy": energy,
+        "path_length_squared_proxy": float(exec_len ** 2),
         "comp_goal": float(reward_components.get("goal", 0.0)),
         "comp_track": float(reward_components.get("tracking", 0.0)),
         "comp_success": float(reward_components.get("success", 0.0)),
-        "comp_smooth": float(reward_components.get("smooth", 0.0)),
+        "comp_smooth": float(reward_components.get("smoothness", reward_components.get("smooth", 0.0))),
+        "comp_terminal": float(reward_components.get("terminal", 0.0)),
         "comp_vel": float(reward_components.get("vel", 0.0)),
         "comp_jerk": float(reward_components.get("jerk", 0.0)),
         "collision_count": int(collision_count),
@@ -223,6 +226,7 @@ def aggregate_episode_metrics(episode_metrics: List[Dict[str, Any]], meta: Dict[
         "comp_track_mean": _nanmean(values("comp_track")),
         "comp_success_mean": _nanmean(values("comp_success")),
         "comp_smooth_mean": _nanmean(values("comp_smooth")),
+        "comp_terminal_mean": _nanmean(values("comp_terminal")),
         "comp_vel_mean": _nanmean(values("comp_vel")),
         "comp_jerk_mean": _nanmean(values("comp_jerk")),
         "collision_rate": _nanmean(values("collision")),

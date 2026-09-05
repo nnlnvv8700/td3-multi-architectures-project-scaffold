@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 导入状态编码器（可选）
 try:
@@ -14,7 +17,7 @@ try:
     ENCODER_AVAILABLE = True
 except ImportError:
     ENCODER_AVAILABLE = False
-    print("[Warning] state_encoder not available, using default encoding")
+    logger.warning("[Warning] state_encoder not available, using default encoding")
 
 
 # -----------------------------
@@ -61,7 +64,7 @@ class KukaPositionalEncoding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term[:pe[:, 1::2].shape[1]])
         self.register_buffer('pe', pe)
 
         # 2. 距离感知偏置（反映运动学链结构）
@@ -261,10 +264,10 @@ class SimpleGNNActor(nn.Module):
                 self.state_encoder = nn.Identity()
             elif num_nodes == 7 and ENCODER_AVAILABLE:
                 self.state_encoder = KukaStateEncoder(node_dim=node_dim)
-                print(f"[GNN] Using KukaStateEncoder: {input_dim} -> {num_nodes}×{node_dim}")
+                logger.debug(f"[GNN] Using KukaStateEncoder: {input_dim} -> {num_nodes}×{node_dim}")
             else:
                 self.state_encoder = StateEncoderWithPadding(input_dim, num_nodes, node_dim)
-                print(f"[GNN] Using StateEncoderWithPadding")
+                logger.debug(f"[GNN] Using StateEncoderWithPadding")
         else:
             self.state_encoder = nn.Identity()
 
@@ -359,14 +362,14 @@ class TransformerActor(nn.Module):
                 self.state_encoder = nn.Identity()
             elif num_nodes == 7 and ENCODER_AVAILABLE:
                 self.state_encoder = KukaStateEncoder(node_dim=node_dim)
-                print(f"[Transformer] Using KukaStateEncoder: {input_dim} -> {num_nodes}×{node_dim}")
+                logger.debug(f"[Transformer] Using KukaStateEncoder: {input_dim} -> {num_nodes}×{node_dim}")
             else:
                 self.state_encoder = StateEncoderWithPadding(
                     input_dim=input_dim,
                     num_nodes=num_nodes,
                     node_dim=node_dim
                 )
-                print(f"[Transformer] Using StateEncoderWithPadding: {input_dim} -> {num_nodes}×{node_dim}")
+                logger.debug(f"[Transformer] Using StateEncoderWithPadding: {input_dim} -> {num_nodes}×{node_dim}")
         else:
             self.state_encoder = nn.Identity()
 
@@ -381,14 +384,14 @@ class TransformerActor(nn.Module):
                 num_joints=num_nodes,
                 use_distance_bias=True
             )
-            print(f"[Transformer] Using KukaPositionalEncoding with distance bias")
+            logger.debug(f"[Transformer] Using KukaPositionalEncoding with distance bias")
         else:
             # 回退到可学习位置编码
             self.pos_encoding = None
             self.pos_embed = nn.Parameter(torch.zeros(num_nodes, d_model))
             nn.init.trunc_normal_(self.pos_embed, std=0.02)
             if use_kuka_pe and num_nodes != 7:
-                print(f"[Transformer] Warning: use_kuka_pe=True but num_nodes={num_nodes} (expect 7), using learnable PE")
+                logger.debug(f"[Transformer] Warning: use_kuka_pe=True but num_nodes={num_nodes} (expect 7), using learnable PE")
 
         self.readout = nn.Sequential(
             nn.Linear(num_nodes * d_model + self.context_dim, 256),
@@ -468,14 +471,14 @@ class GNNTransformerActor(nn.Module):
                 self.state_encoder = nn.Identity()
             elif num_nodes == 7 and ENCODER_AVAILABLE:
                 self.state_encoder = KukaStateEncoder(node_dim=node_dim)
-                print(f"[GNN+Transformer] Using KukaStateEncoder: {input_dim} -> {num_nodes}×{node_dim}")
+                logger.debug(f"[GNN+Transformer] Using KukaStateEncoder: {input_dim} -> {num_nodes}×{node_dim}")
             else:
                 self.state_encoder = StateEncoderWithPadding(
                     input_dim=input_dim,
                     num_nodes=num_nodes,
                     node_dim=node_dim
                 )
-                print(f"[GNN+Transformer] Using StateEncoderWithPadding: {input_dim} -> {num_nodes}×{node_dim}")
+                logger.debug(f"[GNN+Transformer] Using StateEncoderWithPadding: {input_dim} -> {num_nodes}×{node_dim}")
         else:
             self.state_encoder = nn.Identity()
 
@@ -510,14 +513,14 @@ class GNNTransformerActor(nn.Module):
                 num_joints=num_nodes,
                 use_distance_bias=True
             )
-            print(f"[GNN+Transformer] Using KukaPositionalEncoding with distance bias")
+            logger.debug(f"[GNN+Transformer] Using KukaPositionalEncoding with distance bias")
         else:
             # 回退到可学习位置编码
             self.pos_encoding = None
             self.pos_embed = nn.Parameter(torch.zeros(num_nodes, d_model))
             nn.init.trunc_normal_(self.pos_embed, std=0.02)
             if use_kuka_pe and num_nodes != 7:
-                print(f"[GNN+Transformer] Warning: use_kuka_pe=True but num_nodes={num_nodes} (expect 7), using learnable PE")
+                logger.debug(f"[GNN+Transformer] Warning: use_kuka_pe=True but num_nodes={num_nodes} (expect 7), using learnable PE")
 
         # 3) transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)

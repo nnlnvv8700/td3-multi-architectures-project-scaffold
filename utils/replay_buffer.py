@@ -6,7 +6,7 @@ class ReplayBuffer:
 
     - Hindsight Experience Replay: 提升稀疏奖励任务样本效率
     - Prioritized Experience Replay: 基于TD-error优先采样重要样本
-    - 双重优化，预期样本效率提升50-100%
+    Trajectory tracking must disable HER because its reward uses reference/action history.
 
     参考:
     - Andrychowicz et al., "Hindsight Experience Replay", NeurIPS 2017
@@ -18,8 +18,18 @@ class ReplayBuffer:
                  her_prob=0.95, her_k=8,
                  dense_reward=False,
                  distance_threshold=0.05,
-                 use_per=True, alpha=0.6, beta_start=0.4, beta_frames=100000):
+                 use_per=True, alpha=0.6, beta_start=0.4, beta_frames=100000,
+                 per_mode="legacy"):
+        if per_mode not in ("legacy", "proportional"):
+            raise ValueError("per_mode must be legacy or proportional")
+        self.per_mode = per_mode
         self.capacity = int(capacity)
+        if self.capacity <= 0:
+            raise ValueError("capacity must be positive")
+        if not 0 <= her_prob <= 1 or her_k < 0:
+            raise ValueError("her_prob must be in [0, 1] and her_k must be non-negative")
+        if not np.isfinite(alpha) or alpha < 0 or not 0 <= beta_start <= 1 or beta_frames <= 0:
+            raise ValueError("Invalid PER alpha, beta_start or beta_frames")
         self.ptr = 0
         self.size = 0
 
@@ -88,7 +98,7 @@ class ReplayBuffer:
             self.ep_end[0:end_idx+1] = end_idx
 
     # ---------- API ----------
-    def add(self, obs, act, next_obs, rew, done):
+    def add(self, obs, act, next_obs, rew, done, *, terminal=None):
         """obs/next_obs can be dict (GoalEnv) or flat arrays."""
         i = self.ptr
 
@@ -109,7 +119,20 @@ class ReplayBuffer:
             o2 = self._flat_obs(next_obs)
             ag2 = None
 
-        # write
+        action = np.asarray(act, dtype=np.float32).reshape(-1)
+        fields = [("observation", o, self.obs_dim), ("next observation", o2, self.obs_dim),
+                  ("action", action, self.act_dim)]
+        if self.has_goal:
+            fields.extend([("achieved_goal", ag, self.g_dim), ("desired_goal", dg, self.g_dim),
+                           ("next achieved_goal", ag2, self.g_dim)])
+        for name, value, dimension in fields:
+            if value is None or value.shape != (dimension,) or not np.isfinite(value).all():
+                raise ValueError(f"{name} must contain {dimension} finite values")
+        terminal = done if terminal is None else terminal
+        if not np.isfinite(rew) or float(done) not in (0.0, 1.0) or float(terminal) not in (0.0, 1.0):
+            raise ValueError("reward must be finite and done must be boolean")
+
+        # Validate the complete transition before mutating any stored field.
         self.obs[i]  = o
         self.obs2[i] = o2
         if self.g_dim > 0:
@@ -117,9 +140,9 @@ class ReplayBuffer:
             self.dg[i]  = dg
             self.ag2[i] = ag2 if ag2 is not None else 0.0
 
-        self.acts[i] = np.asarray(act, dtype=np.float32).reshape(-1)
+        self.acts[i] = action
         self.rews[i] = float(rew)
-        self.done[i] = float(done)
+        self.done[i] = float(terminal)
         self.ep_end[i] = -1  # will be filled when episode ends
 
         # 🎯 新样本赋予最高优先级
@@ -137,7 +160,12 @@ class ReplayBuffer:
 
     def sample_batch(self, batch_size=256):
         """Return dict with flattened s, s2, a, r, d; with HER relabeling if enabled and goals exist."""
-        assert self.size > 0, "ReplayBuffer is empty."
+        if self.size == 0:
+            raise ValueError("ReplayBuffer is empty")
+        if not isinstance(batch_size, (int, np.integer)) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if self.use_per and self.per_mode == "legacy" and batch_size > self.size:
+            raise ValueError("PER samples without replacement: batch_size cannot exceed buffer size")
 
         # 🎯 优先级采样
         if self.use_per:
@@ -146,18 +174,38 @@ class ReplayBuffer:
             self.frame += 1
 
             # 基于优先级采样
-            priorities = self.priorities[:self.size] ** self.alpha
+            priorities = self.priorities[:self.size]
+            if self.per_mode == "proportional":
+                priorities = priorities.astype(np.float64)
+            priorities = priorities ** self.alpha
             probs = priorities / priorities.sum()
 
-            idxs = np.random.choice(self.size, size=batch_size, p=probs, replace=False)
+            idxs = np.random.choice(self.size, size=batch_size, p=probs,
+                                    replace=self.per_mode == "proportional")
 
             # 计算重要性采样权重
             weights = (self.size * probs[idxs]) ** (-beta)
-            weights = weights / weights.max()  # 归一化
+            normalizer = (self.size * probs.min()) ** (-beta) if self.per_mode == "proportional" else weights.max()
+            weights = weights / normalizer
         else:
             # 均匀采样
             idxs = np.random.randint(0, self.size, size=batch_size)
             weights = None
+
+        if self.her_prob == 0 or self.g_dim == 0:
+            # Batch the canonical no-HER path. Preserve the old RNG consumption
+            # for completed GoalEnv episodes, so subsequent sampling is unchanged.
+            if self.g_dim > 0:
+                np.random.rand(np.count_nonzero(self.ep_end[idxs] >= 0))
+                states = np.concatenate([self.obs[idxs], self.ag[idxs], self.dg[idxs]], axis=1)
+                next_states = np.concatenate([self.obs2[idxs], self.ag2[idxs], self.dg[idxs]], axis=1)
+            else:
+                states, next_states = self.obs[idxs], self.obs2[idxs]
+            batch = dict(obs=states, obs2=next_states, acts=self.acts[idxs],
+                         rews=self.rews[idxs, None], done=self.done[idxs, None])
+            if self.use_per:
+                batch.update(weights=weights, indices=idxs)
+            return batch
 
         s_list, s2_list, a_list, r_list, d_list = [], [], [], [], []
 
@@ -230,9 +278,32 @@ class ReplayBuffer:
         if not self.use_per:
             return
 
+        indices = np.asarray(indices)
+        td_errors = np.asarray(td_errors, dtype=np.float32).reshape(-1)
+        if indices.ndim != 1 or not np.issubdtype(indices.dtype, np.integer):
+            raise ValueError("Priority indices must be a one-dimensional integer array")
+        if len(indices) != len(td_errors) or not np.isfinite(td_errors).all():
+            raise ValueError("TD errors must be finite and match the priority indices")
+        if np.any(indices < 0) or np.any(indices >= self.size):
+            raise ValueError("Priority index outside populated buffer")
+        if not len(indices):
+            return
         priorities = np.abs(td_errors) + 1e-6  # 避免零优先级
-        self.priorities[indices] = priorities
+        if self.per_mode == "proportional":
+            self.priorities[np.unique(indices)] = 0.0
+            np.maximum.at(self.priorities, indices, priorities)
+        else:
+            self.priorities[indices] = priorities
         self.max_priority = max(self.max_priority, priorities.max())
+
+    def sample_uniform_states(self, batch_size):
+        """Uniform policy-update states, independent of prioritized critic sampling."""
+        if self.size == 0 or batch_size <= 0:
+            raise ValueError("Cannot sample an empty buffer or non-positive batch")
+        indices = np.random.randint(self.size, size=batch_size)
+        if self.g_dim:
+            return np.concatenate([self.obs[indices], self.ag[indices], self.dg[indices]], axis=1)
+        return self.obs[indices].copy()
 
     # ===== 新增：兼容你的 TD3.train() 调用 =====
     def sample(self, batch_size=256):

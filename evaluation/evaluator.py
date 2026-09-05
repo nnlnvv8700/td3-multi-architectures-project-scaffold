@@ -10,10 +10,8 @@ from utils.gym_compat import reset_env, step_env
 from .metrics import compute_episode_metrics, aggregate_episode_metrics
 
 
-def _flatten_obs(obs: Any) -> np.ndarray:
-    if isinstance(obs, dict):
-        return np.concatenate([obs["observation"], obs["achieved_goal"], obs["desired_goal"]], axis=0).astype(np.float32)
-    return np.asarray(obs, dtype=np.float32)
+from training.observation import flatten_obs as _flatten_obs
+from training.metrics import trajectory_success
 
 
 def _select_action(agent, state_vec: np.ndarray, deterministic: bool) -> np.ndarray:
@@ -45,17 +43,25 @@ def evaluate_n_episodes(
     *,
     deterministic: bool = True,
     metadata: Optional[Dict[str, Any]] = None,
+    seed: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     metadata = dict(metadata or {})
     metadata.setdefault("deterministic", bool(deterministic))
+    if n_episodes <= 0:
+        raise ValueError("n_episodes must be positive")
+    tracking_mode = getattr(env.unwrapped, "reward_mode", "legacy") == "tracking"
+    metadata["evaluation_protocol"] = "full_trajectory_rmse_and_endpoint_v2" if tracking_mode else "legacy_hold_success"
 
     threshold = float(getattr(env.unwrapped, "distance_threshold", 0.05))
     hold_steps = int(getattr(env.unwrapped, "success_hold_steps", 5))
+    if tracking_mode:
+        hold_steps = 1
 
     episodes: List[Dict[str, Any]] = []
 
     for episode_idx in range(n_episodes):
-        obs, info = reset_env(env)
+        episode_seed = None if seed is None else seed + episode_idx
+        obs, info = reset_env(env, **({"seed": episode_seed} if episode_seed is not None else {}))
         done = False
 
         step_idx = 0
@@ -89,8 +95,8 @@ def evaluate_n_episodes(
 
             if isinstance(info, dict) and "reward_components" in info:
                 rc = info["reward_components"]
-                for key in reward_comp.keys():
-                    reward_comp[key] += float(rc.get(key, 0.0))
+                for key, value in rc.items():
+                    reward_comp[key] = reward_comp.get(key, 0.0) + float(value)
 
             if isinstance(info, dict):
                 if bool(info.get("collision", False)):
@@ -125,13 +131,17 @@ def evaluate_n_episodes(
             step_idx += 1
 
         episode_meta = dict(metadata)
-        episode_meta["episode_seed"] = episode_idx
+        episode_meta["episode_seed"] = episode_seed
+        successful = tts is not None
+        if tracking_mode:
+            successful = trajectory_success(np.asarray(exec_path), ref_path, threshold,
+                                             env.unwrapped.tracking_success_threshold)
 
         record = compute_episode_metrics(
             episode_idx=episode_idx,
             reward_sum=reward_sum,
             episode_len=step_idx,
-            success=float(1.0 if tts is not None else 0.0),
+            success=float(successful),
             tts=tts,
             min_distance=min_distance,
             exec_path=np.asarray(exec_path, dtype=np.float32) if exec_path else None,
@@ -141,6 +151,7 @@ def evaluate_n_episodes(
             meta=episode_meta,
             collision_count=collision_count,
             min_clearance=min_clearance,
+            dt=getattr(env.unwrapped, "dt", 1 / 240) * getattr(env.unwrapped, "sim_steps_per_action", 10),
         )
         episodes.append(record)
 
@@ -155,6 +166,7 @@ def evaluate_policy(
     *,
     deterministic: bool = True,
     metadata: Optional[Dict[str, Any]] = None,
+    seed: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     return evaluate_n_episodes(
         agent=agent,
@@ -162,6 +174,7 @@ def evaluate_policy(
         n_episodes=eval_episodes,
         deterministic=deterministic,
         metadata=metadata,
+        seed=seed,
     )
 
 

@@ -10,8 +10,6 @@
 
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Tuple
 
 
 class KukaStateEncoder(nn.Module):
@@ -47,7 +45,7 @@ class KukaStateEncoder(nn.Module):
         self.encoding_mode = encoding_mode
 
         if node_dim not in [3, 4, 5, 6]:
-            print(f"Warning: node_dim={node_dim} 不是常用配置，推荐使用6维完整目标方向编码")
+            raise ValueError("KukaStateEncoder supports node_dim 3, 4, 5 or 6")
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """
@@ -59,6 +57,8 @@ class KukaStateEncoder(nn.Module):
         Returns:
             nodes: (B, 7 * node_dim) 7个关节节点的展平表示
         """
+        if state.ndim != 2 or state.shape[1] not in (20, 31):
+            raise ValueError("KukaStateEncoder expects a batch of 20-D or 31-D states")
         batch_size = state.shape[0]
 
         # 解析公共关节状态

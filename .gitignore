@@ -2,6 +2,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+.codex-tools/
+.ruff_cache/
+.venv/
+tmp/refactor-*.log
+tmp/check_baseline.py
 .vscode/
 
 results/

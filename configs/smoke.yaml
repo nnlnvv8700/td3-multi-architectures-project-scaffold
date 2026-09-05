@@ -1,0 +1,12 @@
+# Small CPU run through initialization, both TD3 updates, evaluation and saving.
+# All other parameters inherit training/config.py defaults.
+actor_arch: mlp
+device: cpu
+max_timesteps: 4
+start_timesteps: 0
+batch_size: 2
+buffer_size: 8
+eval_freq: 4
+eval_episodes: 1
+env_max_steps: 4
+save_dir: ./results/smoke

@@ -17,6 +17,8 @@ import numpy as np
 import gymnasium as gym
 from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
+from training.observation import flatten_obs
+from utils.gym_compat import reset_env, step_env
 
 from training.metrics import (
     extract_ee_and_goal,
@@ -28,6 +30,7 @@ from training.metrics import (
     extract_distance,
     MetricsAccumulator
 )
+from training.metrics import trajectory_success
 
 
 @dataclass
@@ -57,6 +60,10 @@ class EvaluationResult:
     mean_path_length_exec: float
     mean_path_length_ref: float
     num_episodes: int
+    endpoint_success_rate: float = float("nan")
+    tracking_success_rate: float = float("nan")
+    mean_action_rate: float = float("nan")
+    mean_jerk: float = float("nan")
     
     def to_dict(self) -> Dict[str, float]:
         """转换为字典"""
@@ -70,7 +77,11 @@ class EvaluationResult:
             "mean_endpoint_error": self.mean_endpoint_error,
             "mean_path_length_exec": self.mean_path_length_exec,
             "mean_path_length_ref": self.mean_path_length_ref,
-            "num_episodes": self.num_episodes
+            "num_episodes": self.num_episodes,
+            "endpoint_success_rate": self.endpoint_success_rate,
+            "tracking_success_rate": self.tracking_success_rate,
+            "mean_action_rate": self.mean_action_rate,
+            "mean_jerk": self.mean_jerk,
         }
     
     def __str__(self) -> str:
@@ -144,31 +155,14 @@ class PolicyEvaluator:
         Returns:
             展平后的状态向量
         """
-        if isinstance(obs, dict):
-            return np.concatenate(
-                [obs["observation"], obs["achieved_goal"], obs["desired_goal"]],
-                axis=0
-            ).astype(np.float32)
-        else:
-            return np.array(obs, dtype=np.float32)
-    
+        return flatten_obs(obs)
+
     def _reset_env(self, env: gym.Env, seed: Optional[int] = None) -> Tuple[Any, Dict]:
-        """兼容 gym 和 gymnasium 的 reset"""
-        result = env.reset(seed=seed) if seed is not None else env.reset()
-        if isinstance(result, tuple):
-            return result[0], result[1] if len(result) > 1 else {}
-        else:
-            return result, {}
-    
+        return reset_env(env, **({"seed": seed} if seed is not None else {}))
+
     def _step_env(self, env: gym.Env, action: np.ndarray) -> Tuple[Any, float, bool, Dict]:
-        """兼容 gym 和 gymnasium 的 step"""
-        result = env.step(action)
-        if len(result) == 5:  # gymnasium: obs, reward, terminated, truncated, info
-            obs, reward, terminated, truncated, info = result
-            return obs, reward, terminated or truncated, info
-        else:  # gym: obs, reward, done, info
-            return result
-    
+        return step_env(env, action)
+
     def evaluate_episode(self, seed: Optional[int] = None) -> Dict[str, Any]:
         """
         评估单个回合
@@ -182,6 +176,7 @@ class PolicyEvaluator:
         step_count = 0
         tts = None
         min_distance = float("inf")
+        applied_actions = [np.zeros(self.env.action_space.shape)]
         
         # 记录执行轨迹
         executed_path = []
@@ -201,6 +196,7 @@ class PolicyEvaluator:
         while not done:
             action = self._select_action_deterministic(self._flatten_observation(obs))
             obs, reward, done, info = self._step_env(self.env, action)
+            applied_actions.append(np.asarray(info.get("applied_action", action)).copy())
             total_reward += float(reward)
             
             # 记录末端位置
@@ -229,15 +225,29 @@ class PolicyEvaluator:
         
         # 计算轨迹指标
         exec_path_array = np.array(executed_path) if len(executed_path) > 0 else None
+        rmse = compute_rmse_path(exec_path_array, reference_path)
+        endpoint_error = compute_endpoint_error(exec_path_array, reference_path)
+        endpoint_success = bool(endpoint_error < self.distance_threshold)
+        tracking_success = trajectory_success(exec_path_array, reference_path, self.distance_threshold,
+                                               getattr(self.env.unwrapped, "tracking_success_threshold", 0.05))
+        period = getattr(self.env.unwrapped, "dt", 1.0 / 240) * getattr(self.env.unwrapped, "sim_steps_per_action", 10)
+        action_rate = float(np.sqrt(np.mean((np.diff(applied_actions, axis=0) / period) ** 2)))
+        jerk = float("nan")
+        if exec_path_array is not None and len(exec_path_array) >= 4:
+            jerk = float(np.mean(np.linalg.norm(np.diff(exec_path_array, n=3, axis=0) / period**3, axis=1)))
         
         return {
             "reward": total_reward,
-            "success": tts is not None,
+            "success": tracking_success if getattr(self.env.unwrapped, "reward_mode", "legacy") == "tracking" else tts is not None,
             "tts": tts if tts is not None else step_count,
             "min_distance": min_distance if np.isfinite(min_distance) else np.nan,
-            "rmse": compute_rmse_path(exec_path_array, reference_path),
+            "rmse": rmse,
             "max_deviation": compute_max_deviation(exec_path_array, reference_path),
-            "endpoint_error": compute_endpoint_error(exec_path_array, reference_path),
+            "endpoint_error": endpoint_error,
+            "endpoint_success": endpoint_success,
+            "tracking_success": tracking_success,
+            "action_rate": action_rate,
+            "jerk": jerk,
             "path_length_exec": compute_path_length(exec_path_array),
             "path_length_ref": compute_path_length(reference_path),
             "steps": step_count
@@ -262,11 +272,15 @@ class PolicyEvaluator:
             >>> result = evaluator.evaluate(num_episodes=10, verbose=True)
             >>> print(f"Success rate: {result.success_rate:.2%}")
         """
+        if num_episodes <= 0:
+            raise ValueError("num_episodes must be positive")
         accumulator = MetricsAccumulator()
+        episode_records = []
         
         for episode_idx in range(num_episodes):
             episode_seed = None if self.seed is None else self.seed + episode_idx
             episode_result = self.evaluate_episode(seed=episode_seed)
+            episode_records.append(episode_result)
             
             accumulator.add_episode(
                 reward=episode_result["reward"],
@@ -298,7 +312,11 @@ class PolicyEvaluator:
             mean_endpoint_error=stats["mean_endpoint_error"],
             mean_path_length_exec=stats["mean_path_length_exec"],
             mean_path_length_ref=stats["mean_path_length_ref"],
-            num_episodes=stats["num_episodes"]
+            num_episodes=stats["num_episodes"],
+            endpoint_success_rate=float(np.mean([record["endpoint_success"] for record in episode_records])),
+            tracking_success_rate=float(np.mean([record["tracking_success"] for record in episode_records])),
+            mean_action_rate=float(np.mean([record["action_rate"] for record in episode_records])),
+            mean_jerk=float(np.mean([record["jerk"] for record in episode_records])),
         )
 
 

@@ -9,7 +9,10 @@ def flatten_obs(obs: Any) -> np.ndarray:
     """Flatten a GoalEnv-style observation in one canonical field order."""
     if isinstance(obs, dict):
         return np.concatenate(
-            [obs["observation"], obs["achieved_goal"], obs["desired_goal"]],
+            [
+                np.asarray(obs[key], dtype=np.float32).reshape(-1)
+                for key in ("observation", "achieved_goal", "desired_goal")
+            ],
             axis=0,
         ).astype(np.float32)
     return np.asarray(obs, dtype=np.float32).reshape(-1)

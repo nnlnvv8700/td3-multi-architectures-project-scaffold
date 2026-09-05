@@ -8,6 +8,13 @@
 #   "GNN+Transformer:.\results\seed1\gnn_transformer,.\results\seed2\gnn_transformer,.\results\seed3\gnn_transformer"
 
 import os
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from training.series import align_evaluations
 import json
 import argparse
 import numpy as np
@@ -58,45 +65,12 @@ def build_series_with_seeds(model_groups, metric_key):
     """
     series = {}
     for model_name, run_dirs in model_groups.items():
-        all_y = []
-        max_len = 0
-        
-        # 第一遍：找出最长的序列
-        for rd in run_dirs:
-            m = load_metrics(rd)
-            y = m.get(metric_key, [])
-            if y:
-                y = np.asarray(y, dtype=float)
-                max_len = max(max_len, len(y))
-        
-        if max_len == 0:
+        x, all_y = align_evaluations([load_metrics(rd) for rd in run_dirs], metric_key)
+        if not x.size:
             continue
-        
-        # 第二遍：对齐所有序列（用NaN填充短序列）
-        for rd in run_dirs:
-            m = load_metrics(rd)
-            y = m.get(metric_key, [])
-            if y:
-                y = np.asarray(y, dtype=float)
-                # 如果序列较短，用NaN填充到最长长度
-                if len(y) < max_len:
-                    y_padded = np.full(max_len, np.nan)
-                    y_padded[:len(y)] = y
-                    all_y.append(y_padded)
-                else:
-                    all_y.append(y)
-        
-        if not all_y:
-            continue
-        
-        # 生成x轴
-        x = np.arange(1, max_len + 1, dtype=float)
-        
-        # 计算均值和标准差（忽略NaN值）
-        all_y = np.array(all_y)
         y_mean = np.nanmean(all_y, axis=0)
         y_std = np.nanstd(all_y, axis=0)
-        
+
         series[model_name] = (x, y_mean, y_std, COLOR_MAP.get(model_name))
     
     return series

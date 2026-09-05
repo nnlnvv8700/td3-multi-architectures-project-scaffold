@@ -43,7 +43,8 @@ class ExperimentRunner:
         num_runs_per_arch: int = 1,
         parallel: bool = False,
         gpus: Optional[List[int]] = None,
-        base_save_dir: str = "./results"
+        base_save_dir: str = "./results",
+        timeout: float = 7200,
     ):
         """
         初始化实验运行器
@@ -65,6 +66,13 @@ class ExperimentRunner:
         self.gpus = gpus or [0]
         self.base_save_dir = base_save_dir
         self.base_seed = 42
+        self.timeout = timeout
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if max_timesteps <= 0 or num_runs_per_arch <= 0:
+            raise ValueError("max_timesteps and num_runs_per_arch must be positive")
+        if len(set(self.gpus)) != len(self.gpus) or any(gpu < 0 for gpu in self.gpus):
+            raise ValueError("gpus must contain distinct non-negative indices")
         
         # 实验记录
         self.experiment_log: List[Dict] = []
@@ -108,6 +116,7 @@ class ExperimentRunner:
         # 设置环境变量（GPU）
         env_vars = os.environ.copy()
         env_vars["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        env_vars["PYTHONIOENCODING"] = "utf-8"
         
         # 运行实验
         try:
@@ -116,7 +125,8 @@ class ExperimentRunner:
                 env=env_vars,
                 capture_output=True,
                 text=True,
-                timeout=7200  # 2小时超时
+                encoding="utf-8",
+                timeout=self.timeout
             )
             
             success = result.returncode == 0
@@ -143,14 +153,14 @@ class ExperimentRunner:
             
         except subprocess.TimeoutExpired:
             elapsed_time = time.time() - start_time
-            print(f"⏰ TIMEOUT: {architecture} (Run {run_id}) exceeded 2 hours")
+            print(f"⏰ TIMEOUT: {architecture} (Run {run_id}) exceeded {self.timeout} seconds")
             return {
                 "architecture": architecture,
                 "run_id": run_id,
                 "gpu_id": gpu_id,
                 "success": False,
                 "elapsed_time": elapsed_time,
-                "error": "Timeout after 2 hours",
+                "error": f"Timeout after {self.timeout} seconds",
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
         except Exception as e:
@@ -199,7 +209,7 @@ class ExperimentRunner:
         print(f"{'#'*60}\n")
         
         # 简化实现：使用 concurrent.futures
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
         total_start = time.time()
         
@@ -211,21 +221,26 @@ class ExperimentRunner:
                 tasks.append((arch, run_id, gpu_id))
         
         # 并行执行
-        with ProcessPoolExecutor(max_workers=len(self.gpus)) as executor:
+        # One sequential queue per GPU. A shared queue can accidentally schedule
+        # two preassigned jobs on the same GPU when another job finishes first.
+        with ThreadPoolExecutor(max_workers=len(self.gpus)) as executor:
             future_to_task = {
-                executor.submit(self.run_single_experiment, arch, run_id, gpu_id): (arch, run_id)
-                for arch, run_id, gpu_id in tasks
+                executor.submit(self._run_gpu_queue, [task for task in tasks if task[2] == gpu]): gpu
+                for gpu in self.gpus
             }
             
             for future in as_completed(future_to_task):
-                result = future.result()
-                self.experiment_log.append(result)
-                if not result["success"]:
-                    self.failed_experiments.append(result)
+                for result in future.result():
+                    self.experiment_log.append(result)
+                    if not result["success"]:
+                        self.failed_experiments.append(result)
         
         total_elapsed = time.time() - total_start
         self._print_summary(total_elapsed)
         self._save_experiment_log()
+
+    def _run_gpu_queue(self, tasks):
+        return [self.run_single_experiment(arch, run_id, gpu) for arch, run_id, gpu in tasks]
     
     def _print_summary(self, total_elapsed: float) -> None:
         """打印实验汇总"""
@@ -241,7 +256,7 @@ class ExperimentRunner:
         print(f"✅ Successful: {successful}")
         print(f"❌ Failed: {failed}")
         print(f"⏱️  Total time: {total_elapsed/60:.1f} minutes")
-        print(f"⏱️  Average time per experiment: {total_elapsed/total_experiments/60:.1f} minutes")
+        print(f"⏱️  Average time per experiment: {total_elapsed/max(1, total_experiments)/60:.1f} minutes")
         
         # 按架构统计
         print(f"\n{'─'*60}")
@@ -376,6 +391,8 @@ def main():
         help="结果保存目录 (default: ./results)"
     )
     
+    parser.add_argument("--timeout", type=float, default=7200,
+                        help="Maximum seconds per experiment (default: 7200)")
     args = parser.parse_args()
     
     # 创建运行器
@@ -386,12 +403,15 @@ def main():
         num_runs_per_arch=args.num_runs,
         parallel=args.parallel,
         gpus=args.gpus,
-        base_save_dir=args.save_dir
+        base_save_dir=args.save_dir,
+        timeout=args.timeout,
     )
     
     # 执行实验
     try:
         runner.run()
+        if runner.failed_experiments:
+            sys.exit(1)
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user!")
         runner._print_summary(0)

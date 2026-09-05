@@ -242,6 +242,14 @@ def compute_endpoint_error(
     return float(np.linalg.norm(executed_path[-1] - reference_path[-1]))
 
 
+def trajectory_success(executed_path, reference_path, endpoint_threshold=0.1, rmse_threshold=0.05):
+    """Success requires a complete time-aligned path and an accurate endpoint."""
+    if executed_path is None or reference_path is None or len(executed_path) != len(reference_path):
+        return False
+    return bool(compute_rmse_path(executed_path, reference_path) < rmse_threshold and
+                compute_endpoint_error(executed_path, reference_path) < endpoint_threshold)
+
+
 def nanmean(values: np.ndarray) -> float:
     """
     计算平均值，忽略 NaN 值

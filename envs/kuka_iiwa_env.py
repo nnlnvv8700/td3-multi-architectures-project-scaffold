@@ -11,6 +11,8 @@ import numpy as np
 import pybullet as p
 import pybullet_data
 import time
+from envs.rewards import TrackingReward
+from utils.control import damped_least_squares
 
 
 class KukaIiwa7TrackEnv(gym.Env):
@@ -23,18 +25,17 @@ class KukaIiwa7TrackEnv(gym.Env):
     - 适用于轨迹规划研究
 
     Observation (Dict):
-      - observation: joint positions & velocities (14,)
+      - observation: q/qdot (14,) in v1; trajectory/action context (25,) in v2
       - achieved_goal: end-effector XYZ position (3,)
       - desired_goal: target XYZ position (3,)
 
     Action: joint velocity commands (7,)
 
-    Reward (Dense) - 轨迹规划 + 平滑度优化设计：
-      - Goal: -tanh(dist) + exp(-10*dist) (权重 27%) - 终点吸引
-      - Tracking: exp(-5*tracking_error) (权重 36%) - 轨迹跟踪精度（最重要）
-      - Success: {0, 1} (权重 27%) - 任务完成信号
-      - 🎯 Smoothness: -jerk_magnitude * 0.05 (权重 10%) - 运动平滑度惩罚（新增）
-      - Episode Range: -22 (初始) → +18 (学习中) → +120 (成功+平滑)
+    Reward (Dense):
+      - 0.28 * (-tanh(dist) + exp(-10*dist))
+      - 0.37 * exp(-5*tracking_error)
+      - 0.28 * success
+      - 0.07 * (-0.05 * ||action - previous_action||²), except on the first step
 
     Reward (Sparse):
       - 0 if dist < threshold else -1
@@ -55,6 +56,17 @@ class KukaIiwa7TrackEnv(gym.Env):
         seed=None,
         done_on_success=False,  # 🔧 轨迹跟踪默认不提前终止
         observation_version=2,
+        reward_mode="legacy",
+        control_mode="direct",
+        residual_scale=0.2,
+        controller_gain=4.0,
+        controller_damping=0.05,
+        tracking_position_scale=0.10,
+        tracking_terminal_scale=0.05,
+        tracking_smooth_weight=0.02,
+        tracking_terminal_weight=2.0,
+        joint_limit_margin=0.0,
+        tracking_success_threshold=0.05,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -65,6 +77,40 @@ class KukaIiwa7TrackEnv(gym.Env):
         self.joint_vel_limit = float(joint_vel_limit)
         self.done_on_success = bool(done_on_success)
         self.observation_version = int(observation_version)
+        self.reward_mode = reward_mode
+        self.control_mode = control_mode
+        self.residual_scale = float(residual_scale)
+        self.controller_gain = float(controller_gain)
+        self.controller_damping = float(controller_damping)
+        self.joint_limit_margin = float(joint_limit_margin)
+        self.tracking_success_threshold = float(tracking_success_threshold)
+        if not np.isfinite(self.tracking_success_threshold) or self.tracking_success_threshold <= 0:
+            raise ValueError("tracking_success_threshold must be finite and positive")
+        if reward_mode not in ("legacy", "tracking") or control_mode not in ("direct", "residual"):
+            raise ValueError("Invalid reward_mode or control_mode")
+        if reward_mode == "tracking" and (observation_version != 2 or not dense_reward or done_on_success):
+            raise ValueError("Tracking reward requires v2 state, dense reward and full episodes")
+        if control_mode == "residual" and observation_version != 2:
+            raise ValueError("Residual control requires the v2 trajectory state")
+        for name in ("controller_gain", "controller_damping"):
+            if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if not 0 <= self.residual_scale <= 1 or not 0 <= self.joint_limit_margin < 1:
+            raise ValueError("Invalid residual_scale or joint_limit_margin")
+        self.tracking_reward = TrackingReward(
+            position_scale=tracking_position_scale, terminal_scale=tracking_terminal_scale,
+            smooth_weight=tracking_smooth_weight, terminal_weight=tracking_terminal_weight,
+        )
+        if render_mode not in (None, "human", "rgb_array"):
+            raise ValueError(f"Unsupported render_mode: {render_mode}")
+        if self.observation_version not in (1, 2):
+            raise ValueError("observation_version must be 1 or 2")
+        if self.max_steps <= 0 or self.sim_steps_per_action <= 0:
+            raise ValueError("max_steps and sim_steps_per_action must be positive")
+        if not np.isfinite(self.joint_vel_limit) or self.joint_vel_limit <= 0:
+            raise ValueError("joint_vel_limit must be finite and positive")
+        if not np.isfinite(self.distance_threshold) or self.distance_threshold <= 0:
+            raise ValueError("distance_threshold must be finite and positive")
 
         # 轨迹跟踪专用属性
         self._ref_traj = None  # 参考轨迹 (T, 3)
@@ -120,17 +166,12 @@ class KukaIiwa7TrackEnv(gym.Env):
         """内部安全断开：幂等 & 容错。"""
         cid = self._p_client
         self._p_client = None
-        try:
-            if cid is not None:
-                try:
-                    p.disconnect(cid)
-                except Exception:
-                    try:
-                        p.disconnect()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if cid is not None:
+            try:
+                if p.isConnected(cid):
+                    p.disconnect(physicsClientId=cid)
+            except p.error:
+                pass
 
     def _reset_sim(self):
         p.resetSimulation(physicsClientId=self._p_client)
@@ -147,6 +188,10 @@ class KukaIiwa7TrackEnv(gym.Env):
 
         # End-effector link (URDF EEF is link index 6)
         self.ee_link = 6
+        joint_info = [p.getJointInfo(self.robot_id, j, physicsClientId=self._p_client)
+                      for j in range(self.n_joints)]
+        self.joint_lower = np.array([info[8] for info in joint_info])
+        self.joint_upper = np.array([info[9] for info in joint_info])
 
         # Reset joints & disable default motors (velocity controlled by us)
         for j in range(self.n_joints):
@@ -187,6 +232,7 @@ class KukaIiwa7TrackEnv(gym.Env):
 
     # ---------- Gym API ----------
     def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         self._connect()
@@ -214,7 +260,25 @@ class KukaIiwa7TrackEnv(gym.Env):
         return obs, info
 
     def step(self, action):
+        if self._p_client is None or self.robot_id is None:
+            raise RuntimeError("Call reset() before step()")
+        action = np.asarray(action)
+        if action.shape != (self.n_joints,) or not np.isfinite(action).all():
+            raise ValueError(f"Action must have shape ({self.n_joints},) and contain finite values")
         action = np.clip(action, self.action_space.low, self.action_space.high)
+        policy_action = action.copy()
+        baseline_action = np.zeros(self.n_joints)
+        if self.control_mode == "residual":
+            baseline_action = self.baseline_action()
+            action = np.clip(baseline_action + self.residual_scale * action,
+                             self.action_space.low, self.action_space.high)
+        if self.joint_limit_margin > 0:
+            q, _ = self._get_q_qdot()
+            period = self.dt * self.sim_steps_per_action
+            lower = (self.joint_lower + self.joint_limit_margin - q) / period
+            upper = (self.joint_upper - self.joint_limit_margin - q) / period
+            action = np.clip(np.clip(action, lower, upper),
+                             self.action_space.low, self.action_space.high)
         previous_action = self._prev_action.copy()
         had_previous_action = self._has_prev_action
 
@@ -243,7 +307,13 @@ class KukaIiwa7TrackEnv(gym.Env):
         goal_pos = obs["desired_goal"]
         dist = np.linalg.norm(ee_pos - goal_pos)
 
-        if self.dense_reward:
+        reward_components = {}
+        if self.reward_mode == "tracking":
+            reward, reward_components = self.tracking_reward(
+                ee_pos, self._current_reference_point(), goal_pos, action, previous_action,
+                self.joint_vel_limit, terminal=self.step_counter >= self.max_steps,
+            )
+        elif self.dense_reward:
             # 🎯 轨迹跟踪专用奖励设计
             # 参考：OpenAI Robotics (2018) + 轨迹跟踪扩展 + 平滑度优化
 
@@ -275,6 +345,10 @@ class KukaIiwa7TrackEnv(gym.Env):
                 0.28 * success_reward +      # 强调：任务完成信号
                 0.07 * action_smooth_penalty  # 🎯 新增：动作平滑度（一阶差分，稳定）
             )
+            reward_components = {"goal": float(0.28 * goal_reward),
+                                 "tracking": float(0.37 * tracking_reward),
+                                 "success": float(0.28 * success_reward),
+                                 "smoothness": float(0.07 * action_smooth_penalty)}
 
             # Episode 累积范围（200 步）：
             # - 初始随机：0.3*(-0.5)*200 + 0.4*(0.1)*200 ≈ -22
@@ -285,6 +359,10 @@ class KukaIiwa7TrackEnv(gym.Env):
             reward = 0.0 if dist < self.distance_threshold else -1.0
 
         terminated = False
+        if self.reward_mode == "tracking" and self.step_counter >= self.max_steps:
+            # The reference has ended: this is a finite-horizon task terminal,
+            # distinct from an external time-limit interruption.
+            terminated = True
         if self._is_success(obs["achieved_goal"], obs["desired_goal"]) and self.done_on_success:
             terminated = True
         truncated = (not terminated) and (self.step_counter >= self.max_steps)
@@ -297,8 +375,30 @@ class KukaIiwa7TrackEnv(gym.Env):
             "reference_point": self._current_reference_point(),
             "phase": self._phase(),
             "prev_action": self._prev_action.copy(),
+            "policy_action": policy_action,
+            "applied_action": action.copy(),
+            "baseline_action": baseline_action,
+            "reward_components": reward_components,
+            "tracking_error": float(np.linalg.norm(ee_pos - self._current_reference_point())),
+            "control_dt": self.dt * self.sim_steps_per_action,
         }
         return obs, reward, terminated, truncated, info
+
+    def baseline_action(self):
+        """Feedforward reference velocity plus Cartesian error feedback, via DLS."""
+        q, _ = self._get_q_qdot()
+        zeros = [0.0] * self.n_joints
+        jacobian, _ = p.calculateJacobian(
+            self.robot_id, self.ee_link, [0.0, 0.0, 0.0], q.tolist(), zeros, zeros,
+            physicsClientId=self._p_client,
+        )
+        index = min(self._current_step, self.max_steps - 1)
+        velocity = (self._ref_traj[index + 1] - self._ref_traj[index]) / (
+            self.dt * self.sim_steps_per_action
+        )
+        velocity = velocity + self.controller_gain * (self._current_reference_point() - self._eef_pos())
+        command = damped_least_squares(jacobian, velocity, self.controller_damping)
+        return np.clip(command, self.action_space.low, self.action_space.high)
 
     def render(self):
         # 使用 GUI 模式时，PyBullet 自带窗口就是渲染
@@ -309,7 +409,7 @@ class KukaIiwa7TrackEnv(gym.Env):
         try:
             if self._p_client is not None:
                 return bool(p.isConnected(self._p_client))
-            return bool(p.isConnected())
+            return False
         except Exception:
             return False
 

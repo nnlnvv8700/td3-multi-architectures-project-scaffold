@@ -95,7 +95,7 @@ def build_series(run_dirs, metric_key, labels_order, ma_window=0):
         x = steps_x(m)
         y = m.get(metric_key, [])
         y = np.asarray(y, dtype=float) if y else np.array([])
-        if ma_window and len(y) >= ma_window:
+        if ma_window > 1 and len(y) >= ma_window:
             y_ma = moving_average(y, ma_window)
             if x is not None and len(x) >= len(y_ma):
                 x_ma = x[-len(y_ma):]   # 右对齐

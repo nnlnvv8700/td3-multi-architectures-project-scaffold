@@ -1,5 +1,31 @@
 # GT-TD3：KUKA iiwa 多架构轨迹跟踪
 
+新增可选算法版本：时间对齐奖励、运动学残差控制、TD3/PER 修正及完整轨迹评估。
+配置见 [algorithm_v2.yaml](configs/algorithm_v2.yaml)，原理、兼容性与实测结果见
+[算法优化报告](docs/ALGORITHM_OPTIMIZATION.md)。原默认算法保留；新版需显式启用：
+
+```bash
+python -m training.train_experiment --config configs/algorithm_v2.yaml
+```
+
+该配置是待长训练验证的候选方案。本轮短训练中，最佳残差模型来自训练前的纯运动学控制器，
+尚未证明网络学习带来的增益；不能将其结果用于宣称新算法或架构优越性。
+
+工程审查与兼容性说明见 [重构报告](docs/REFACTOR_REPORT.md)，模块导入清单见
+[source inventory](docs/source_inventory.md)。原训练入口保留；新增可选 JSON/YAML 配置：
+
+```bash
+python -m training.train_experiment --config configs/smoke.yaml
+python -m training.train_experiment --config configs/smoke.yaml --actor_arch gnn_transformer
+python -m pytest -q
+python tools/audit_project.py
+```
+
+`smoke.yaml` 仅验证运行链路，不用于性能实验。默认参数仍在 `training/config.py`；显式命令行参数覆盖配置文件。
+开发检查依赖可通过 `pip install -r requirements-dev.txt` 安装，静态检查使用 `ruff check .`。
+每次训练新增 `run.log` 和 `runtime.json`，原有模型与指标文件格式保留。历史 `experiment_configs.yaml`
+不是当前训练入口的配置格式，请勿直接传入 `--config`。
+
 > A reproducible TD3 research scaffold for KUKA LBR iiwa trajectory tracking in PyBullet.
 
 [![Paper](https://img.shields.io/badge/Machines-14%20(4)%2C%20397-2f80c1)](https://doi.org/10.3390/machines14040397)
@@ -38,7 +64,7 @@ Stable Trajectory Tracking of High-Degree-of-Freedom (DOF) Manipulators**，发�
 - 轨迹阶段、当前参考点和前一动作显式进入状态，避免隐藏状态破坏 Markov 性。
 - 固定评估目标集、完整随机种子控制、PER、模型与实验配置自动归档。
 - 成功率、TTS、最小距离、轨迹 RMSE、最大偏差、终点误差和路径长度等指标。
-- PyBullet 多 client 隔离及 9 项单元/端到端回归测试。
+- PyBullet 多 client 隔离及单元/端到端回归测试。
 
 ## 系统结构
 

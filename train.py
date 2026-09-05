@@ -3,7 +3,6 @@
 Prefer: python -m training.train_experiment --actor_arch <architecture>
 """
 
-import subprocess
 import sys
 
 
@@ -16,15 +15,13 @@ def main() -> int:
         print(f"Usage: python train.py <architecture> [extra args]\nChoices: {choices}")
         return 2
     architecture = sys.argv[1].lower()
-    command = [
-        sys.executable,
-        "-m",
-        "training.train_experiment",
-        "--actor_arch",
-        architecture,
-        *sys.argv[2:],
-    ]
-    return subprocess.run(command, check=False).returncode
+    from training.config import parse_args
+    from training.train_experiment import configure_logging, run_experiment
+
+    config = parse_args(["--actor_arch", architecture, *sys.argv[2:]])
+    configure_logging(config.log_level)
+    run_experiment(config)
+    return 0
 
 
 if __name__ == "__main__":

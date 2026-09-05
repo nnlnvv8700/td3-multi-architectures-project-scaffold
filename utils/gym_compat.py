@@ -39,9 +39,15 @@ def step_env(env, action):
     if n == 5:
         obs, reward, terminated, truncated, info = res
         done = bool(terminated) or bool(truncated)
-        return obs, reward, done, (info if isinstance(info, dict) else {})
+        info = dict(info) if isinstance(info, dict) else {}
+        info["terminated"] = bool(terminated)
+        info["truncated"] = bool(truncated)
+        return obs, reward, done, info
     elif n == 4:
         obs, reward, done, info = res
-        return obs, reward, bool(done), (info if isinstance(info, dict) else {})
+        info = dict(info) if isinstance(info, dict) else {}
+        info["truncated"] = bool(done) and bool(info.get("TimeLimit.truncated", False))
+        info["terminated"] = bool(done) and not info["truncated"]
+        return obs, reward, bool(done), info
     else:
         raise ValueError(f"env.step 返回数量异常: 期望 4 或 5，收到 {n}: {res}")
