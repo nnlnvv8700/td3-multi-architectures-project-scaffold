@@ -83,7 +83,7 @@ tracking 模式的成功条件为：执行完整参考轨迹，所有对应点�
 
 核心评估、独立测试和扩展论文评估共享完整轨迹成功判定。legacy 主评估仍保留旧的“曾进入终点范围”口径，比较不同奖励时应使用明确的 tracking_success_rate，而非直接混用 success_rate。
 
-corrected 从第 0 步起进行验证，按“跟踪成功率优先，其次 RMSE，最后终点误差”保存 `best_model.pt`。验证目标种子默认从 10000 开始；本轮留出测试从 20000 开始。独立测试入口和增强评估优先加载 corrected 的 best_model，仍保留 final_model 供显式检查。选出第 0 步是合法结果，意味着后续训练尚未改进初始策略。
+corrected 从第 0 步起进行验证，按“跟踪成功率优先，其次 RMSE，最后终点误差”保存 `best_model.pt`。验证目标种子默认从 10000 开始；本轮留出测试从 20000 开始。独立测试入口优先加载 corrected 的 best_model，仍保留 final_model 供显式检查。选出第 0 步是合法结果，意味着后续训练尚未改进初始策略。
 
 权重仍是 Actor 的 state_dict，同时新增同名 `.meta.json`，用于验证 algorithm_version、动作边界及 direct/residual 语义。**复制新版模型时，应携带元数据和同目录 config.json，不能仅复制 .pt。** corrected 拒绝没有元数据的权重；历史 legacy 无侧文件权重仍允许加载。旧权重不能直接按 corrected 缩放和残差语义解释。
 
@@ -93,7 +93,7 @@ corrected 从第 0 步起进行验证，按“跟踪成功率优先，其次 RMS
 
 ## 6. 已执行验证
 
-最终检查：`python -m pytest -q` 为 **38 passed**；Ruff 正确性检查通过；静态审计编译 **68 个 Python 文件**，`git diff --check` 无空白错误。新版 GNN+Transformer 的独立测试命令已实际加载 `best_model.pt`，完成一个留出目标回合并输出指标和图片。
+算法修改完成时的检查为 38 项测试通过；仓库清理后仍以 `python -m pytest -q`、Ruff 和全源文件编译作为最终门禁。新版 GNN+Transformer 的独立测试命令已实际加载 `best_model.pt`，完成一个留出目标回合并输出指标和图片。
 
 自动回归覆盖奖励偏好、末步奖励、平滑项尺度、终止/截断自举、PER 分布及权重、重复优先级、奇异 Jacobian 求解、Bullet Jacobian 数值差分、零残差控制、四种 Actor 的训练/重载、确定性、未裁剪 Q 目标和评估协议一致性。
 

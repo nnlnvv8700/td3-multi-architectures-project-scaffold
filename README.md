@@ -11,8 +11,7 @@ python -m training.train_experiment --config configs/algorithm_v2.yaml
 该配置是待长训练验证的候选方案。本轮短训练中，最佳残差模型来自训练前的纯运动学控制器，
 尚未证明网络学习带来的增益；不能将其结果用于宣称新算法或架构优越性。
 
-工程审查与兼容性说明见 [重构报告](docs/REFACTOR_REPORT.md)，模块导入清单见
-[source inventory](docs/source_inventory.md)。原训练入口保留；新增可选 JSON/YAML 配置：
+项目保留一套训练、测试和结果绘图入口，并支持可选 JSON/YAML 配置：
 
 ```bash
 python -m training.train_experiment --config configs/smoke.yaml
@@ -23,8 +22,7 @@ python tools/audit_project.py
 
 `smoke.yaml` 仅验证运行链路，不用于性能实验。默认参数仍在 `training/config.py`；显式命令行参数覆盖配置文件。
 开发检查依赖可通过 `pip install -r requirements-dev.txt` 安装，静态检查使用 `ruff check .`。
-每次训练新增 `run.log` 和 `runtime.json`，原有模型与指标文件格式保留。历史 `experiment_configs.yaml`
-不是当前训练入口的配置格式，请勿直接传入 `--config`。
+每次训练会写入 `run.log`、`runtime.json`、模型权重和评估指标。
 
 > A reproducible TD3 research scaffold for KUKA LBR iiwa trajectory tracking in PyBullet.
 
@@ -196,8 +194,7 @@ pip install -r requirements.txt
 ### 运行回归测试
 
 ```bash
-python -m unittest discover -s tests -v
-python verify_system.py
+python -m pytest -q
 ```
 
 ### 训练
@@ -232,9 +229,6 @@ python -m training.train_experiment --actor_arch gnn_transformer --seed 42 --eva
 ```bash
 python -m training.train_experiment --help
 ```
-
-`train.py` 只是兼容包装器，实际训练逻辑仅在
-`training.train_experiment` 中维护。
 
 ### 测试模型
 
@@ -271,12 +265,18 @@ python -m training.evaluate --run_dirs \
 ```text
 results/<env>_<arch>_dense_<timestamp>_seed<seed>/
 ├── config.json
+├── best_model.pt
+├── best_model.meta.json
 ├── final_model.pt
+├── final_model.meta.json
 ├── checkpoint_latest.pt
+├── checkpoint_latest.meta.json
 ├── metrics.json
 ├── episodes.csv
 ├── rewards.npy
-└── success.npy
+├── success.npy
+├── run.log
+└── runtime.json
 ```
 
 跨实验稳定表头汇总写入：
@@ -284,8 +284,6 @@ results/<env>_<arch>_dense_<timestamp>_seed<seed>/
 ```text
 results/training_summary_v2.csv
 ```
-
-历史 `training_summary.csv` 存在字段演化导致的列错位，仅供追溯，不应继续用于论文统计。
 
 ## 目录结构
 
@@ -297,7 +295,8 @@ results/training_summary_v2.csv
 │   ├── networks.py           # 四种 Actor 与共享 Critic
 │   └── state_encoder.py      # 关节节点编码和图结构
 ├── envs/
-│   └── kuka_iiwa_env.py      # PyBullet 轨迹跟踪环境
+│   ├── kuka_iiwa_env.py      # PyBullet 轨迹跟踪环境
+│   └── rewards.py            # 时间对齐轨迹奖励
 ├── training/
 │   ├── train_experiment.py   # 唯一规范训练循环
 │   ├── config.py             # 参数与架构默认值
@@ -305,10 +304,15 @@ results/training_summary_v2.csv
 │   ├── evaluator.py          # 固定种子策略评估
 │   ├── artifacts.py          # checkpoint、指标和汇总
 │   ├── test_agent.py         # 模型测试与轨迹导出
-│   └── evaluate.py           # 多架构结果绘图
+│   ├── evaluate.py           # 多架构结果绘图
+│   └── run_all_experiments.py# 多架构/多种子批量实验
+├── evaluation/               # 论文级轨迹指标与结果导出 API
 ├── utils/
-│   ├── replay_buffer.py      # PER 与兼容 HER 的经验池
+│   ├── replay_buffer.py      # PER 与经验池
+│   ├── control.py            # 阻尼最小二乘控制器
 │   └── gym_compat.py         # Gym/Gymnasium API 兼容层
+├── configs/                  # 正式候选配置与 smoke 配置
+├── docs/                     # 算法说明与可复现实验记录
 ├── tests/                    # 单元和端到端回归测试
 ├── requirements.txt
 └── README.md

@@ -184,7 +184,7 @@ def main():
     ap.add_argument("--run_dirs", type=str, nargs="+", required=True, help="多个训练结果目录")
     ap.add_argument("--out", type=str, default=None, help="输出目录（默认 plots/compare_scientific_时间戳）")
     ap.add_argument("--ma_window", type=int, default=0, help="可选：滑动平均窗口（0=关闭）")
-    ap.add_argument("--fill_band", action="store_true", help="已弃用；不再绘制伪造的±10%不确定性带")
+    ap.add_argument("--fill_band", action="store_true", help="已弃用；不再绘制伪造的正负百分之十不确定性带")
     args = ap.parse_args()
 
     out_dir = args.out or os.path.join("plots", f"compare_scientific_{datetime.now().strftime('%Y%m%d_%H%M%S')}")

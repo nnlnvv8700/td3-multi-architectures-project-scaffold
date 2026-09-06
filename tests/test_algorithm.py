@@ -253,19 +253,9 @@ class AlgorithmTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "semantics"):
                         TD3(31, 7, 1.5, wrong).load_actor(run / "final_model.pt")
                     if arch == "mlp":
-                        from training.evaluate_enhanced import load_agent_from_run
                         from training.test_agent import find_weight_file
 
                         self.assertEqual(Path(find_weight_file(run)), run / "best_model.pt")
-                        agent.load_actor(run / "best_model.pt")
-                        loaded, env, _ = load_agent_from_run(str(run))
-                        try:
-                            self.assertEqual(env.unwrapped.control_mode, "residual")
-                            np.testing.assert_array_equal(
-                                loaded.select_action(np.ones(31)), agent.select_action(np.ones(31))
-                            )
-                        finally:
-                            env.close()
 
     def test_corrected_dropout_does_not_change_policy_between_modes(self):
         config = corrected_config("unused", "gnn_transformer")

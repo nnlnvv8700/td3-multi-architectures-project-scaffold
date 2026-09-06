@@ -63,7 +63,7 @@ def inspect_sources(root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs" / "source_inventory.md")
+    parser.add_argument("--output", type=Path, help="Optional Markdown inventory output path")
     args = parser.parse_args()
     records = inspect_sources()
     lines = [
@@ -79,9 +79,12 @@ def main():
     ]
     for name, count, imports, symbols in records:
         lines.append(f"| `{name}` | {count} | {', '.join(imports)} | {', '.join(symbols)} |")
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"Compiled {len(records)} Python files; inventory: {args.output}")
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"Compiled {len(records)} Python files; inventory: {args.output}")
+    else:
+        print(f"Compiled {len(records)} Python files")
 
 
 if __name__ == "__main__":

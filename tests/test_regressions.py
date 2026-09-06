@@ -17,7 +17,6 @@ from envs.kuka_iiwa_env import KukaIiwa7TrackEnv
 from training.artifacts import append_summary
 from training.config import parse_args
 from training.train_experiment import run_experiment
-from training.series import align_evaluations
 from utils.persistence import atomic_output
 
 
@@ -52,15 +51,12 @@ def small_config(directory, architecture="mlp", per=True):
 class ConfigRegressionTests(unittest.TestCase):
     def test_single_point_smoothing_window_keeps_raw_series(self):
         from training.evaluate import build_series
-        from training.evaluate_enhanced import build_series_single
 
         record = {"eval_steps": [0, 100], "eval_rewards": [1, 2]}
-        for function, module in [(build_series, "training.evaluate"),
-                                 (build_series_single, "training.evaluate_enhanced")]:
-            with patch(module + ".load_metrics", return_value=record):
-                series = function(["mlp"], "eval_rewards", [], ma_window=1)
-                np.testing.assert_array_equal(series["MLP"][1], [1, 2])
-                self.assertIsNone(series["MLP"][4])
+        with patch("training.evaluate.load_metrics", return_value=record):
+            series = build_series(["mlp"], "eval_rewards", [], ma_window=1)
+            np.testing.assert_array_equal(series["MLP"][1], [1, 2])
+            self.assertIsNone(series["MLP"][4])
 
     def test_invalid_parameters_fail_at_startup(self):
         for option, value in [
@@ -97,34 +93,7 @@ class ConfigRegressionTests(unittest.TestCase):
                     run_experiment(config)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
-    def test_seed_series_align_by_step(self):
-        steps, values = align_evaluations(
-            [
-                {"eval_steps": [0, 5000, 10000], "reward": [1, 2, 3]},
-                {"eval_steps": [0, 10000], "reward": [5, 7]},
-            ],
-            "reward",
-        )
-        np.testing.assert_array_equal(steps, [0, 1])
-        np.testing.assert_array_equal(values, [[1, 3], [5, 7]])
-        with self.assertRaises(ValueError):
-            align_evaluations([{"reward": [1, 2]}], "reward")
-
-
 class NetworkRegressionTests(unittest.TestCase):
-    def test_enhanced_evaluation_loads_saved_environment(self):
-        from training.evaluate_enhanced import generate_trajectories
-
-        with tempfile.TemporaryDirectory() as directory:
-            run_dir = run_experiment(small_config(directory))
-            with patch("training.evaluate_enhanced.plot_trajectories"):
-                paths, rewards, successes = generate_trajectories(
-                    run_dir, [42], num_episodes=1, out_dir=str(Path(directory) / "eval")
-                )
-            self.assertEqual(paths[0][0].shape, (3, 3))  # initial point + saved two-step horizon
-            self.assertTrue(np.isfinite(rewards).all())
-            self.assertEqual(np.asarray(successes).shape, (1, 1))
-
     def test_legacy_v1_checkpoints_still_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             for arch in ("mlp", "gnn", "transformer", "gnn_transformer"):
